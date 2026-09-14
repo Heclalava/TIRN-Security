@@ -684,8 +684,12 @@ function updateRuleCount(){
   el.classList.toggle("blocked-count",policy.size>0);
 }
 
+let policyRequestGeneration=0;
+
 async function loadPolicy(){
+  const requestGeneration=policyRequestGeneration;
   const data=await api("/policy");
+  if(requestGeneration!==policyRequestGeneration)return;
 
   policy.clear();
 
@@ -1294,6 +1298,7 @@ async function confirmClearAll(){
   }
 
   writeBusy=true;
+  policyRequestGeneration++;
 
   try{
     await api("/clear");
