@@ -3,6 +3,7 @@
 PM="/system/bin/pm"
 DATA_DIR="/data/adb/tirnsecurity"
 CACHE="$DATA_DIR/apps.json"
+. "$DATA_DIR/app-common.sh" 2>/dev/null || exit 1
 TMP="$DATA_DIR/apps.json.$$"
 USERS="$DATA_DIR/users.$$"
 LABELS="$DATA_DIR/labels.conf"
@@ -68,16 +69,14 @@ do
 
         [ -z "$apk" ] && continue
 
-        if [ -x "$APK_LABEL" ]; then
-            name=$("$APK_LABEL" "$apk" 2>/dev/null)
-            case "$name" in
-                *"
+        name="$(get_apk_label "$apk")"
+        case "$name" in
+            *"
 "*|*"	"*) name="" ;;
-            esac
+        esac
 
-            if [ -n "$name" ]; then
-                printf '%s|%s\n' "$pkg" "$name" >> "$APK_LABELS"
-            fi
+        if [ -n "$name" ]; then
+            printf '%s|%s\n' "$pkg" "$name" >> "$APK_LABELS"
         fi
     done < "$PKGS"
 
