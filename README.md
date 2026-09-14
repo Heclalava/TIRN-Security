@@ -150,14 +150,14 @@ them to apply application-specific network policies.
 
 The primary TIRN Security chains are:
 
-- `PIXELFW`
-- `PIXELFW-MOBILE`
-- `PIXELFW-WIFI`
-- `PIXELFW-LAN`
+- `TIRNFW`
+- `TIRNFW-MOBILE`
+- `TIRNFW-WIFI`
+- `TIRNFW-LAN`
 
 IPv6 uses the corresponding TIRN Security-owned chains as well.
 
-The main `PIXELFW` dispatcher determines the appropriate
+The main `TIRNFW` dispatcher determines the appropriate
 TIRN Security network policy chain based on the active network.
 
 Application policies are then applied using the application's
