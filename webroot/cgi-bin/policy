@@ -54,6 +54,18 @@ case "$action" in
 '; exit 1 ;;
 esac
 
+LOCK="$DATA_DIR/policy.lock"
+LOCK_WAIT=0
+while ! mkdir "$LOCK" 2>/dev/null; do
+    sleep 0.05
+    LOCK_WAIT=$((LOCK_WAIT + 1))
+    if [ "$LOCK_WAIT" -ge 200 ]; then
+        printf '%s\n' '{"status":"ERROR","error":"Policy busy"}'
+        exit 1
+    fi
+done
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
 touch "$POLICY" || { printf '{"status":"ERROR","error":"Policy unavailable"}
 '; exit 1; }
 chmod 600 "$POLICY"
