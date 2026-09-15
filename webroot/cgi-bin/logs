@@ -1,0 +1,96 @@
+#!/system/bin/sh
+
+MODDIR="/data/adb/modules/tirnsecurity"
+DATA_DIR="/data/adb/tirnsecurity"
+APP_AUDIT="$MODDIR/appaudit"
+WORK="$DATA_DIR/log-export.$$"
+REPORT="$WORK/TIRN-security-report"
+ARCHIVE="$WORK/TIRN-security-report.zip"
+LOCK="$DATA_DIR/log-export.lock"
+
+umask 077
+
+cleanup() {
+    rm -rf "$WORK"
+    rmdir "$LOCK" 2>/dev/null
+}
+
+trap cleanup EXIT
+
+if ! mkdir "$LOCK" 2>/dev/null; then
+    exit 1
+fi
+
+mkdir -p "$REPORT" || exit 1
+
+if [ ! -x "$APP_AUDIT" ]; then
+    exit 1
+fi
+
+"$APP_AUDIT" "$DATA_DIR/apps.json" "$REPORT/apps-audit.txt" || exit 1
+
+GENERATED="$(/system/bin/date '+%Y-%m-%d %H:%M:%S %Z%z' 2>/dev/null)"
+DEVICE="$(/system/bin/getprop ro.product.model 2>/dev/null)"
+ANDROID="$(/system/bin/getprop ro.build.version.release 2>/dev/null)"
+MODULE_VERSION=""
+if [ -f "$MODDIR/module.prop" ]; then
+    MODULE_VERSION="$(/system/bin/awk -F= '$1 == "version" {print substr($0,index($0,"=")+1); exit}' "$MODDIR/module.prop" 2>/dev/null)"
+fi
+
+{
+    printf '%s\n' '================================================'
+    printf '%s\n' 'TIRN Security Diagnostic Report'
+    printf 'Generated: %s\n' "$GENERATED"
+    printf 'Device: %s\n' "$DEVICE"
+    printf 'Android: %s\n' "$ANDROID"
+    printf 'TIRN Security: %s\n' "${MODULE_VERSION:-Unknown}"
+    printf '%s\n' '================================================'
+    printf '\n%s\n' 'Included files'
+    printf '%s\n' '---------------'
+} > "$REPORT/report.txt"
+
+for FILE in \
+    apps.json \
+    service.log \
+    installation.log \
+    httpd.log \
+    refresh-apps.log \
+    network.state \
+    policy.conf \
+    policy.applied \
+    apps-refresh-progress
+do
+    if [ -f "$DATA_DIR/$FILE" ]; then
+        cp -f "$DATA_DIR/$FILE" "$REPORT/$FILE" || exit 1
+        printf '%s\n' "$FILE" >> "$REPORT/report.txt"
+    else
+        printf '%s (not present)\n' "$FILE" >> "$REPORT/report.txt"
+    fi
+done
+
+printf '%s\n' 'apps-audit.txt' >> "$REPORT/report.txt"
+printf '\n%s\n' 'End of report.' >> "$REPORT/report.txt"
+
+FILES="report.txt apps-audit.txt apps.json service.log installation.log httpd.log refresh-apps.log network.state policy.conf policy.applied apps-refresh-progress"
+
+set -- $FILES
+ZIP_FILES=""
+for FILE
+do
+    if [ -f "$REPORT/$FILE" ]; then
+        ZIP_FILES="$ZIP_FILES $FILE"
+    fi
+done
+
+"$APP_AUDIT" --zip "$ARCHIVE" "$REPORT" $ZIP_FILES || exit 1
+
+[ -s "$ARCHIVE" ] || exit 1
+
+printf '%s\n' 'Content-Type: application/zip'
+printf '%s\n' 'Content-Disposition: attachment; filename="TIRN-security-report.zip"'
+printf '%s\n' 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0'
+printf '%s\n' 'Pragma: no-cache'
+printf '%s\n' 'Expires: 0'
+printf '\n'
+
+cat "$ARCHIVE"

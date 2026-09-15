@@ -2,6 +2,7 @@
 /tools/apklabel/apklabel
 /tools/apklabel/apklabel-arm64
 /tools/apphelper/apphelper-arm64
+/tools/appaudit/appaudit-arm64
 /tools/apphelper/apklabel-arm64
 
 # Local test backups and generated release artifacts

@@ -1222,6 +1222,34 @@ function setTaskStatus(status){
   if(el)el.textContent=status;
 }
 
+async function downloadLogs(){
+  setTaskStatus("EXPORTING");
+
+  try{
+    const response=await fetch(API+"/logs",{cache:"no-store"});
+    if(!response.ok){
+      throw new Error("HTTP "+response.status);
+    }
+
+    const blob=await response.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;
+    a.download="TIRN-security-report.zip";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    setTimeout(()=>{URL.revokeObjectURL(url)},1000);
+    toast("Diagnostic report downloaded");
+  }catch(e){
+    console.error("TIRN Security diagnostic export failed:",e);
+    toast("Diagnostic export failed");
+  }finally{
+    setTaskStatus("READY");
+  }
+}
+
 function exportBackup(){
   setTaskStatus("EXPORTING");
   const data={
