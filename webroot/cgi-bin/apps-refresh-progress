@@ -1,0 +1,34 @@
+#!/system/bin/sh
+
+echo "Content-Type: application/json"
+echo "Cache-Control: no-store, no-cache, must-revalidate, max-age=0"
+echo "Pragma: no-cache"
+echo "Expires: 0"
+echo
+
+DATA_DIR="/data/adb/tirnsecurity"
+PROGRESS="$DATA_DIR/apps-refresh-progress"
+LOCK="$DATA_DIR/apps.lock"
+
+if [ ! -f "$PROGRESS" ]; then
+    printf '{"status":"IDLE","processed":0,"total":0}\n'
+    exit 0
+fi
+
+STATUS=$(/system/bin/awk -F'"' '/"status"/ {print $4; exit}' "$PROGRESS" 2>/dev/null)
+
+case "$STATUS" in
+    RUNNING)
+        if [ -d "$LOCK" ]; then
+            cat "$PROGRESS"
+        else
+            printf '{"status":"ERROR","message":"App cache refresh stopped unexpectedly"}\n'
+        fi
+        ;;
+    COMPLETE|ERROR)
+        cat "$PROGRESS"
+        ;;
+    *)
+        printf '{"status":"ERROR","message":"Invalid app cache progress state"}\n'
+        ;;
+esac

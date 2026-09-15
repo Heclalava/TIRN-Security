@@ -37,6 +37,41 @@ button{color:inherit}
 .brand{font-size:22px;font-weight:700;letter-spacing:.02em}
 .brand-dot{color:var(--green)}
 .header-actions{display:flex;gap:6px;flex:none}
+.main-menu{
+  display:none;
+  position:absolute;
+  top:calc(100% - 1px);
+  right:0;
+  width:min(220px,calc(100vw - 24px));
+  padding:6px;
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:0 0 9px 9px;
+  box-shadow:
+    inset 1px 1px 3px rgba(255,255,255,.045),
+    inset -2px -2px 4px rgba(0,0,0,.55),
+    0 5px 12px rgba(0,0,0,.55);
+  z-index:60;
+}
+.main-menu.show{display:block}
+.main-menu button{
+  display:block;
+  width:100%;
+  min-height:38px;
+  padding:7px 10px;
+  border:0;
+  border-radius:6px;
+  background:transparent;
+  color:var(--text);
+  text-align:left;
+  font-size:14px;
+}
+.main-menu button:active{
+  background:var(--panel2);
+}
+.main-menu button.danger{
+  color:var(--red);
+}
 .icon-btn,.small-btn{
   border:1px solid var(--line);
   background:var(--panel);
@@ -57,14 +92,6 @@ button{color:inherit}
   font-size:20px;
   line-height:1;
 }
-.icon-btn.backup{
-  font-size:16px;
-}
-
-.icon-btn.refresh{
-  font-size:27px;
-  transform:translateY(-1px);
-}
 .icon-btn:active,
 .small-btn:active,
 .filter:active,
@@ -82,7 +109,7 @@ button{color:inherit}
 .statusline b.blocked-count{
   color:var(--red);
 }
-.statusline .ok{color:var(--engine-green)!important}.statusline .bad{color:var(--red)!important}.statusline .warn{color:var(--yellow)!important}
+.statusline .ok{color:var(--engine-green)!important}.statusline .bad{color:var(--red)!important}.statusline .warn{color:var(--yellow)!important}.statusline #taskStatus{color:#C5C898!important}.statusline #blockedLabel{color:var(--text)}
 .toolbar{
   flex:none;
   margin:0 8px 7px;
@@ -299,7 +326,7 @@ button{color:inherit}
     inset 1px 1px 2px rgba(255,255,255,.035),
     inset -1px 0 2px rgba(0,0,0,.35);
 }
-.matrix-head .apphead{text-align:left;padding-left:9px}
+.matrix-head .apphead{text-align:left;padding-left:9px;display:flex;align-items:center;gap:6px}.refresh-apps-list{flex:none;width:18px;height:18px;box-sizing:border-box;padding:3%;border:1px solid var(--line);border-radius:5px;background:linear-gradient(to bottom,rgba(235,219,178,.04),rgba(60,56,54,.16));box-shadow:inset 1px 1px 1px rgba(255,255,255,.035),inset -1px -1px 1px rgba(0,0,0,.28),0 1px 2px rgba(0,0,0,.2);color:var(--text);font-size:17px;font-weight:600;letter-spacing:0;line-height:1;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center}.refresh-apps-list:active{background:var(--panel2);box-shadow:inset 1px 1px 1px rgba(0,0,0,.32),inset -1px -1px 1px rgba(255,255,255,.025)}
 #appRows{
   flex:1;
   min-height:0;
@@ -508,13 +535,22 @@ button{color:inherit}
       <div class="statusline">
         <span id="engine">ENGINE …</span>
         <span>•</span>
-        <span><b id="ruleCount">0</b> blocked</span>
+        <span><b id="ruleCount">0</b> <span id="blockedLabel">BLOCKED</span></span>
+        <span>•</span>
+        <span id="taskStatus">READY</span>
       </div>
     </div>
     <div class="header-actions">
-      <button class="icon-btn refresh" onclick="refreshAll()" title="Refresh">↻</button>
-      <button class="icon-btn backup" onclick="showBackup()" title="Backup">⇅</button>
+      <button class="icon-btn menu-btn" onclick="toggleMainMenu()" aria-label="Open menu" aria-expanded="false">☰</button>
     </div>
+  </div>
+
+  <div id="mainMenu" class="main-menu">
+    <button onclick="hideMainMenu();refreshAppCache()">Refresh app cache</button>
+    <button onclick="hideMainMenu();downloadLogs()">Download logs</button>
+    <button onclick="exportBackup();hideMainMenu()">Export policy</button>
+    <button onclick="document.getElementById('importFile').click();hideMainMenu()">Import policy</button>
+    <button class="danger" onclick="hideMainMenu();clearAll()">Clear all blocks</button>
   </div>
 </header>
 
@@ -561,7 +597,7 @@ button{color:inherit}
 <div class="list-wrapper">
 
   <div class="matrix-head">
-    <div class="apphead">APPLICATION</div>
+    <div class="apphead"><span>APPLICATION</span><button class="refresh-apps-list" onclick="refreshAppsList()" aria-label="Refresh app list">↻</button></div>
     <div>MOBILE</div>
     <div>WIFI</div>
     <div>LAN</div>
@@ -587,17 +623,7 @@ button{color:inherit}
 
 <div id="toast" class="toast"></div>
 
-<div id="modalBack" class="modal-back" onclick="if(event.target===this)hideBackup()">
-  <div class="modal">
-    <h2>Policy backup</h2>
-    <p>Backups contain TIRN Security policy entries only. No Android firewall chains are modified by these operations.</p>
-    <button onclick="exportBackup()">Export policy</button>
-    <button onclick="document.getElementById('importFile').click()">Import policy</button>
-    <button class="danger" onclick="clearAll()">Clear all TIRN Security blocks</button>
-    <button onclick="hideBackup()">Cancel</button>
-    <input id="importFile" type="file" accept=".json,application/json" hidden onchange="importBackup(this.files[0])"/>
-  </div>
-</div>
+<input id="importFile" type="file" accept=".json,application/json" hidden onchange="importBackup(this.files[0])"/>
 
 <div id="bulkProgressBack" class="modal-back" style="z-index:110">
   <div class="modal bulk-progress-modal">
@@ -743,6 +769,77 @@ async function setPolicy(uid,network,blocked){
     updateRuleCount();
     policySignature=getPolicySignature();
     toast("Policy updated");
+  }finally{
+    writeBusy=false;
+  }
+}
+
+async function refreshAppsList(){
+  if(writeBusy)return;
+  try{
+    await loadApps();
+    render();
+  }catch(e){
+    console.error("TIRN Security app list refresh failed:",e);
+    setTaskStatus("ERROR");
+    setTimeout(()=>setTaskStatus("READY"),2000);
+  }
+}
+
+async function refreshAppCache(){
+  if(writeBusy)return;
+  writeBusy=true;
+  showBulkProgress("Refresh app cache",0);
+  try{
+    const data=await api("/refresh-apps",{method:"POST"});
+    if(!data || data.status!=="OK"){
+      throw new Error(data?.message||"App cache refresh failed");
+    }
+
+    for(;;){
+      const progress=await api("/apps-refresh-progress");
+      if(!progress || progress.status==="ERROR"){
+        throw new Error(progress?.message||"App cache refresh failed");
+      }
+
+      if(progress.status==="RUNNING" || progress.status==="COMPLETE"){
+        const processed=Number(progress.processed)||0;
+        const total=Number(progress.total)||0;
+        if(progress.status==="RUNNING"){
+          const state=document.getElementById("bulkProgressState");
+          const status=document.getElementById("bulkProgressStatus");
+          state.textContent="RUNNING";
+          state.className="bulk-progress-state";
+          status.textContent="Refreshing application cache…";
+        }
+        updateBulkProgress(processed,total);
+      }else if(progress.status==="IDLE"){
+        const state=document.getElementById("bulkProgressState");
+        const status=document.getElementById("bulkProgressStatus");
+        state.textContent="PREPARING";
+        state.className="bulk-progress-state";
+        status.textContent="Preparing application cache…";
+        document.getElementById("bulkProgressCount").textContent="Preparing…";
+        document.getElementById("bulkProgressPercent").textContent="—";
+        document.getElementById("bulkProgressBar").style.width="0%";
+      }
+
+      if(progress.status==="COMPLETE")break;
+      await new Promise(resolve=>setTimeout(resolve,1000));
+    }
+
+    await loadApps();
+    render();
+
+    const revisionData=await api("/apps-revision");
+    if(revisionData && revisionData.status==="OK" && revisionData.revision!==undefined){
+      appRevision=String(revisionData.revision);
+    }
+
+    finishBulkProgress(true,"App cache refreshed");
+  }catch(e){
+    console.error("TIRN Security app cache refresh failed:",e);
+    finishBulkProgress(false,"App cache refresh failed","REFRESH_ERROR");
   }finally{
     writeBusy=false;
   }
@@ -1097,15 +1194,36 @@ async function refreshAll(){
   }
 }
 
-function showBackup(){
-  document.getElementById("modalBack").classList.add("show");
+function toggleMainMenu(){
+  const menu=document.getElementById("mainMenu");
+  const button=document.querySelector(".menu-btn");
+  const show=!menu.classList.contains("show");
+  menu.classList.toggle("show",show);
+  button.setAttribute("aria-expanded",show?"true":"false");
 }
 
-function hideBackup(){
-  document.getElementById("modalBack").classList.remove("show");
+function hideMainMenu(){
+  const menu=document.getElementById("mainMenu");
+  const button=document.querySelector(".menu-btn");
+  if(menu)menu.classList.remove("show");
+  if(button)button.setAttribute("aria-expanded","false");
+}
+
+document.addEventListener("click",e=>{
+  const menu=document.getElementById("mainMenu");
+  const button=document.querySelector(".menu-btn");
+  if(menu&&menu.classList.contains("show")&&!menu.contains(e.target)&&e.target!==button){
+    hideMainMenu();
+  }
+});
+
+function setTaskStatus(status){
+  const el=document.getElementById("taskStatus");
+  if(el)el.textContent=status;
 }
 
 function exportBackup(){
+  setTaskStatus("EXPORTING");
   const data={
     version:3,
     type:"TIRN Security",
@@ -1138,11 +1256,12 @@ function exportBackup(){
   a.click();
   a.remove();
   setTimeout(()=>{URL.revokeObjectURL(url)},1000);
-  hideBackup();
   toast("Policy exported");
+  setTaskStatus("READY");
 }
 
 async function importBackup(file){
+  setTaskStatus("IMPORTING");
   if(!file)return;
 
   try{
@@ -1193,7 +1312,6 @@ async function importBackup(file){
     }
 
     writeBusy=true;
-    hideBackup();
     showBulkProgress("Import policy",changes.length);
 
     let done=0;
@@ -1210,9 +1328,11 @@ async function importBackup(file){
     policySignature=getPolicySignature();
     render();
     finishBulkProgress(true,"Import policy complete","");
+    setTaskStatus("READY");
     toast("Policy imported");
   }catch(e){
     finishBulkProgress(false,"Import policy failed","PF-BULK-006");
+    setTaskStatus("ERROR");
     await loadPolicy().catch(()=>{});
     policySignature=getPolicySignature();
     render();
@@ -1226,7 +1346,6 @@ async function importBackup(file){
 
 async function clearAll(){
   if(!policy.size){
-    hideBackup();
     toast("Nothing to clear");
     return;
   }
@@ -1235,17 +1354,19 @@ async function clearAll(){
 }
 
 function showBulkProgress(title,total){
+  setTaskStatus(title==="Import policy"?"IMPORTING":title==="Refresh app cache"?"REFRESHING":"UPDATING");
   const back=document.getElementById("bulkProgressBack");
   const state=document.getElementById("bulkProgressState");
   const close=document.getElementById("bulkProgressClose");
   document.getElementById("bulkProgressTitle").textContent=title;
-  document.getElementById("bulkProgressStatus").textContent="Applying TIRN Security policy changes…";
+  const preparing=title==="Refresh app cache";
+  document.getElementById("bulkProgressStatus").textContent=preparing?"Preparing application cache…":"Applying TIRN Security policy changes…";
   document.getElementById("bulkProgressBar").style.width="0%";
-  document.getElementById("bulkProgressCount").textContent="0 / "+total;
-  document.getElementById("bulkProgressPercent").textContent="0%";
+  document.getElementById("bulkProgressCount").textContent=preparing?"Preparing…":"0 / "+total;
+  document.getElementById("bulkProgressPercent").textContent=preparing?"—":"0%";
   document.getElementById("bulkProgressError").textContent="";
   document.getElementById("bulkProgressError").classList.remove("show");
-  state.textContent="RUNNING";
+  state.textContent=preparing?"PREPARING":"RUNNING";
   state.className="bulk-progress-state";
   close.disabled=true;
   back.style.display="flex";
@@ -1269,9 +1390,11 @@ function finishBulkProgress(success,message,code){
   if(success){
     error.textContent="";
     error.classList.remove("show");
+    setTaskStatus("READY");
   }else{
     error.textContent=code+(message?" — "+message:"");
     error.classList.add("show");
+    setTaskStatus("ERROR");
   }
   close.disabled=false;
 }
@@ -1299,15 +1422,17 @@ async function confirmClearAll(){
 
   writeBusy=true;
   policyRequestGeneration++;
+  setTaskStatus("UPDATING");
 
   try{
     await api("/clear");
     policy.clear();
     policySignature=getPolicySignature();
-    hideBackup();
     render();
+    setTaskStatus("READY");
     toast("Policy cleared");
   }catch(e){
+    setTaskStatus("ERROR");
     toast("Clear failed");
   }finally{
     writeBusy=false;
@@ -1318,6 +1443,7 @@ async function init(){
   try{
     await loadPolicy();
     await loadApps();
+    await refreshAppRevision(true);
     await readNetwork();
     await readEngine();
     render();
@@ -1331,9 +1457,37 @@ async function init(){
 
 let policyRefreshBusy=false;
 let policySignature="";
+let appRevisionBusy=false;
+let appRevision="";
 
 function getPolicySignature(){
   return Array.from(policy.keys()).sort().join("\n");
+}
+
+async function refreshAppRevision(force=false){
+  if(appRevisionBusy || writeBusy || document.visibilityState!=="visible") return;
+  appRevisionBusy=true;
+  try{
+    const data=await api("/apps-revision");
+    if(!data || data.status==="ERROR" || data.revision===undefined) return;
+
+    const revision=String(data.revision);
+
+    if(force){
+      appRevision=revision;
+      return;
+    }
+
+    if(appRevision!==revision){
+      appRevision=revision;
+      await loadApps();
+      render();
+    }
+  }catch(e){
+    console.error("TIRN Security app revision check failed:",e);
+  }finally{
+    appRevisionBusy=false;
+  }
 }
 
 async function refreshPolicy(force=false){
@@ -1359,6 +1513,7 @@ window.addEventListener("focus",()=>refreshPolicy(true));
 
 setInterval(()=>{
   refreshPolicy(false);
+  refreshAppRevision(false);
 },10000);
 
 init();

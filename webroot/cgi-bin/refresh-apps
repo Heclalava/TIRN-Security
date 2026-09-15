@@ -1,0 +1,40 @@
+#!/system/bin/sh
+
+echo "Content-Type: application/json"
+echo "Cache-Control: no-store, no-cache, must-revalidate, max-age=0"
+echo "Pragma: no-cache"
+echo "Expires: 0"
+echo
+
+MODDIR="/data/adb/modules/tirnsecurity"
+DATA_DIR="/data/adb/tirnsecurity"
+REFRESH="$MODDIR/refresh_apps"
+LOCK="$DATA_DIR/apps.lock"
+LOG="$DATA_DIR/refresh-apps.log"
+
+if [ ! -x "$REFRESH" ]; then
+    printf '{"status":"ERROR","message":"App cache refresh unavailable"}\n'
+    exit 1
+fi
+
+if [ -d "$LOCK" ]; then
+    printf '{"status":"ERROR","message":"App cache refresh already running"}\n'
+    exit 1
+fi
+
+rm -f "$DATA_DIR/apps-refresh-progress" "$DATA_DIR/apps-refresh-progress.tmp" 2>/dev/null
+
+(
+    /system/bin/sh "$REFRESH" >>"$LOG" 2>&1
+) &
+
+PID=$!
+
+case "$PID" in
+    ''|*[!0-9]*)
+        printf '{"status":"ERROR","message":"Could not start app cache refresh"}\n'
+        exit 1
+        ;;
+esac
+
+printf '{"status":"OK","message":"App cache refresh started","pid":%s}\n' "$PID"

@@ -14,8 +14,19 @@ APK_PATHS="$DATA_DIR/apkpaths.$$"
 APK_LABEL_CACHE="$DATA_DIR/apk-label-cache.$$"
 APK_UNIQUE="$DATA_DIR/apk-unique.$$"
 ELIGIBLE_PKGS="$DATA_DIR/eligible-pkgs.$$"
+PROGRESS="$DATA_DIR/apps-refresh-progress"
+PROGRESS_TMP="$PROGRESS.$$"
+PROGRESS_ACTIVE=0
 
-trap 'rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]*' EXIT
+write_progress() {
+    STATE="$1"
+    PROCESSED="$2"
+    TOTAL="$3"
+    printf '{"status":"%s","processed":%s,"total":%s}\n' "$STATE" "$PROCESSED" "$TOTAL" > "$PROGRESS_TMP" &&
+    mv -f "$PROGRESS_TMP" "$PROGRESS"
+}
+
+trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$PROGRESS_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]*' EXIT
 
 mkdir -p "$DATA_DIR" || exit 1
 
@@ -102,7 +113,7 @@ if ! acquire_apps_lock; then
     exit 2
 fi
 
-trap 'rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$PROGRESS_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
 
 
 "$PM" list users 2>/dev/null |
@@ -176,6 +187,14 @@ done
 
 /system/bin/sort -u -o "$APK_UNIQUE" "$APK_UNIQUE"
 
+PROGRESS_TOTAL=$(/system/bin/wc -l < "$APK_UNIQUE")
+case "$PROGRESS_TOTAL" in
+    ''|*[!0-9]*) exit 1 ;;
+esac
+PROGRESS_PROCESSED=0
+PROGRESS_ACTIVE=1
+write_progress "RUNNING" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"
+
 : > "$APK_LABEL_CACHE"
 
 while IFS= read -r apk
@@ -183,6 +202,11 @@ do
     [ -z "$apk" ] && continue
 
     name="$(get_apk_label "$apk")"
+
+    PROGRESS_PROCESSED=$((PROGRESS_PROCESSED + 1))
+    if [ $((PROGRESS_PROCESSED % 5)) -eq 0 ] || [ "$PROGRESS_PROCESSED" -eq "$PROGRESS_TOTAL" ]; then
+        write_progress "RUNNING" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"
+    fi
     case "$name" in
         *"
 "*|*"	"*) name="" ;;
