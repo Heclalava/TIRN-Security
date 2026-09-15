@@ -19,6 +19,9 @@ trap 'rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_
 
 mkdir -p "$DATA_DIR" || exit 1
 
+TIRN_LOCALE="$(/system/bin/getprop persist.sys.locale 2>/dev/null)"
+export TIRN_LOCALE
+
 get_proc_start() {
     PID="$1"
     STAT="/proc/$PID/stat"

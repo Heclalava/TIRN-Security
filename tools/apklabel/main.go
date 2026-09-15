@@ -21,12 +21,14 @@ type Application struct {
 }
 
 func deviceLocale() *androidbinary.ResTableConfig {
-	out, err := exec.Command("/system/bin/getprop", "persist.sys.locale").Output()
-	if err != nil {
-		return &androidbinary.ResTableConfig{}
+	locale := strings.TrimSpace(os.Getenv("TIRN_LOCALE"))
+	if locale == "" {
+		out, err := exec.Command("/system/bin/getprop", "persist.sys.locale").Output()
+		if err != nil {
+			return &androidbinary.ResTableConfig{}
+		}
+		locale = strings.TrimSpace(string(out))
 	}
-
-	locale := strings.TrimSpace(string(out))
 	if i := strings.Index(locale, "-u-"); i >= 0 {
 		locale = locale[:i]
 	}
