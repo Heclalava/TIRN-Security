@@ -1,0 +1,5 @@
+# Local build artifacts
+/tools/apklabel/apklabel
+/tools/apklabel/apklabel-arm64
+/tools/apphelper/apphelper-arm64
+/tools/apphelper/apklabel-arm64

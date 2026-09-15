@@ -12,6 +12,11 @@ if [ -f "$MODDIR/data/labels.conf" ]; then
     chmod 600 "$DATA_DIR/labels.conf"
 fi
 
+if [ -f "$MODDIR/app-common.sh" ]; then
+    cp -f "$MODDIR/app-common.sh" "$DATA_DIR/app-common.sh"
+    chmod 755 "$DATA_DIR/app-common.sh"
+fi
+
 log_msg() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$INSTALL_LOG"
 }
@@ -43,7 +48,7 @@ log_msg "========================================="
 
 
 
-chmod 755 "$MODDIR/action.sh" "$MODDIR/app-watch.sh" "$MODDIR/apklabel" "$MODDIR/customize.sh" "$MODDIR/policy-watch.sh" "$MODDIR/policy-watch.sh-handler" "$MODDIR/post-fs-data.sh" "$MODDIR/refresh_apps" "$MODDIR/service.sh" "$MODDIR/uninstall.sh" "$MODDIR/verify.sh" "$MODDIR/webserver.sh" "$MODDIR/webserver-start.sh"
+chmod 755 "$MODDIR/action.sh" "$MODDIR/apphelper" "$MODDIR/app-watch.sh" "$MODDIR/app-queue.sh" "$MODDIR/apklabel" "$MODDIR/customize.sh" "$MODDIR/policy-watch.sh" "$MODDIR/policy-watch.sh-handler" "$MODDIR/post-fs-data.sh" "$MODDIR/refresh_apps" "$MODDIR/service.sh" "$MODDIR/uninstall.sh" "$MODDIR/verify.sh" "$MODDIR/webserver.sh" "$MODDIR/webserver-start.sh"
 chmod 755 "$MODDIR/webroot/cgi-bin/apps" "$MODDIR/webroot/cgi-bin/clear" "$MODDIR/webroot/cgi-bin/policy" "$MODDIR/webroot/cgi-bin/policy_refresh" "$MODDIR/webroot/cgi-bin/refresh" "$MODDIR/webroot/cgi-bin/status"
 
 touch "$DATA_DIR/blocked_uids.txt"
