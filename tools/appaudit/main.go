@@ -200,9 +200,162 @@ func zipMode() {
 	}
 }
 
+func policyMode() {
+	if len(os.Args) != 5 {
+		fmt.Fprintf(os.Stderr, "Usage: %s --policy apps.json policy-file output.txt\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	appsPath := os.Args[2]
+	policyPath := os.Args[3]
+	outputPath := os.Args[4]
+
+	data, err := os.ReadFile(appsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read apps.json: %v\n", err)
+		os.Exit(1)
+	}
+
+	var appsFile AppsFile
+	if err := json.Unmarshal(data, &appsFile); err != nil {
+		fmt.Fprintf(os.Stderr, "parse apps.json: %v\n", err)
+		os.Exit(1)
+	}
+
+	type policyApp struct {
+		Name    string
+		Package string
+	}
+
+	appsByUID := make(map[string]policyApp, len(appsFile.Apps))
+	for _, app := range appsFile.Apps {
+		if _, exists := appsByUID[app.UID]; !exists {
+			appsByUID[app.UID] = policyApp{
+				Name:    app.Name,
+				Package: app.Package,
+			}
+		}
+	}
+
+	in, err := os.Open(policyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open policy: %v\n", err)
+		os.Exit(1)
+	}
+	defer in.Close()
+
+	type policyRow struct {
+		UID     string
+		Network string
+		Action  string
+		AppName string
+		Package string
+	}
+
+	var rows []policyRow
+	scanner := bufio.NewScanner(in)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Split(line, "|")
+		if len(parts) != 3 {
+			continue
+		}
+
+		uid := strings.TrimSpace(parts[0])
+		network := strings.TrimSpace(parts[1])
+		action := strings.TrimSpace(parts[2])
+		if uid == "" || network == "" || action == "" {
+			continue
+		}
+
+		app := appsByUID[uid]
+		name := app.Name
+		pkg := app.Package
+		if name == "" {
+			name = "Unknown"
+		}
+		if pkg == "" {
+			pkg = "Unknown"
+		}
+
+		rows = append(rows, policyRow{
+			UID:     uid,
+			Network: network,
+			Action:  action,
+			AppName: name,
+			Package: pkg,
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "read policy: %v\n", err)
+		os.Exit(1)
+	}
+
+	out, err := os.Create(outputPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create policy audit: %v\n", err)
+		os.Exit(1)
+	}
+	defer out.Close()
+
+	fmt.Fprintln(out, "================================================")
+	fmt.Fprintf(out, "TIRN Security Policy Audit: %s\n", policyPath)
+	generated := mustCommand("/system/bin/date", "+%Y-%m-%d %H:%M:%S %Z%z")
+	fmt.Fprintf(out, "Generated: %s\n", strings.TrimSpace(string(generated)))
+	fmt.Fprintf(out, "Device: %s\n", strings.TrimSpace(string(mustCommand("/system/bin/getprop", "ro.product.model"))))
+	fmt.Fprintf(out, "Android: %s\n", strings.TrimSpace(string(mustCommand("/system/bin/getprop", "ro.build.version.release"))))
+	fmt.Fprintln(out, "================================================")
+	fmt.Fprintln(out)
+
+	headers := []string{"UID", "APP NAME", "PACKAGE", "INTERFACE", "ACTION"}
+	widths := []int{
+		len(headers[0]),
+		len(headers[1]),
+		len(headers[2]),
+		len(headers[3]),
+		len(headers[4]),
+	}
+
+	for _, row := range rows {
+		values := []string{row.UID, row.AppName, row.Package, row.Network, row.Action}
+		for i, value := range values {
+			if len(value) > widths[i] {
+				widths[i] = len(value)
+			}
+		}
+	}
+
+	format := fmt.Sprintf(
+		"%%-%ds  %%-%ds  %%-%ds  %%-%ds  %%-%ds\n",
+		widths[0], widths[1], widths[2], widths[3], widths[4],
+	)
+
+	fmt.Fprintf(out, format, headers[0], headers[1], headers[2], headers[3], headers[4])
+
+	totalWidth := widths[0] + widths[1] + widths[2] + widths[3] + widths[4] + 8
+	fmt.Fprintln(out, strings.Repeat("-", totalWidth))
+
+	for _, row := range rows {
+		fmt.Fprintf(out, format, row.UID, row.AppName, row.Package, row.Network, row.Action)
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Policy entries: %d\n", len(rows))
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--zip" {
 		zipMode()
+		return
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "--policy" {
+		policyMode()
 		return
 	}
 

@@ -29,6 +29,14 @@ fi
 
 "$APP_AUDIT" "$DATA_DIR/apps.json" "$REPORT/apps-audit.txt" || exit 1
 
+if [ -s "$DATA_DIR/policy.conf" ]; then
+    "$APP_AUDIT" --policy "$DATA_DIR/apps.json" "$DATA_DIR/policy.conf" "$REPORT/policy.conf" || exit 1
+fi
+
+if [ -s "$DATA_DIR/policy.applied" ]; then
+    "$APP_AUDIT" --policy "$DATA_DIR/apps.json" "$DATA_DIR/policy.applied" "$REPORT/policy.applied" || exit 1
+fi
+
 GENERATED="$(/system/bin/date '+%Y-%m-%d %H:%M:%S %Z%z' 2>/dev/null)"
 DEVICE="$(/system/bin/getprop ro.product.model 2>/dev/null)"
 ANDROID="$(/system/bin/getprop ro.build.version.release 2>/dev/null)"
@@ -50,34 +58,35 @@ fi
 } > "$REPORT/report.txt"
 
 for FILE in \
-    apps.json \
     service.log \
+    debug.log \
     installation.log \
-    httpd.log \
-    refresh-apps.log \
-    network.state \
-    policy.conf \
-    policy.applied \
-    apps-refresh-progress
+    httpd.log
 do
-    if [ -f "$DATA_DIR/$FILE" ]; then
+    if [ -s "$DATA_DIR/$FILE" ]; then
         cp -f "$DATA_DIR/$FILE" "$REPORT/$FILE" || exit 1
         printf '%s\n' "$FILE" >> "$REPORT/report.txt"
     else
-        printf '%s (not present)\n' "$FILE" >> "$REPORT/report.txt"
+        printf '%s (not present or empty)\n' "$FILE" >> "$REPORT/report.txt"
     fi
 done
 
 printf '%s\n' 'apps-audit.txt' >> "$REPORT/report.txt"
+if [ -s "$REPORT/policy.conf" ]; then
+    printf '%s\n' 'policy.conf (Configured Policy)' >> "$REPORT/report.txt"
+fi
+if [ -s "$REPORT/policy.applied" ]; then
+    printf '%s\n' 'policy.applied (Applied Policy)' >> "$REPORT/report.txt"
+fi
 printf '\n%s\n' 'End of report.' >> "$REPORT/report.txt"
 
-FILES="report.txt apps-audit.txt apps.json service.log installation.log httpd.log refresh-apps.log network.state policy.conf policy.applied apps-refresh-progress"
+FILES="report.txt apps-audit.txt policy.conf policy.applied service.log debug.log installation.log httpd.log"
 
 set -- $FILES
 ZIP_FILES=""
 for FILE
 do
-    if [ -f "$REPORT/$FILE" ]; then
+    if [ -s "$REPORT/$FILE" ]; then
         ZIP_FILES="$ZIP_FILES $FILE"
     fi
 done
@@ -87,7 +96,7 @@ done
 [ -s "$ARCHIVE" ] || exit 1
 
 printf '%s\n' 'Content-Type: application/zip'
-printf '%s\n' 'Content-Disposition: attachment; filename="TIRN-security-report.zip"'
+STAMP=$(date '+%Y%m%d-%H%M'); printf '%s\n' "Content-Disposition: attachment; filename=\"TIRN-security-report-$STAMP.zip\""
 printf '%s\n' 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0'
 printf '%s\n' 'Pragma: no-cache'
 printf '%s\n' 'Expires: 0'
