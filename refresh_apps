@@ -17,6 +17,10 @@ ELIGIBLE_PKGS="$DATA_DIR/eligible-pkgs.$$"
 PROGRESS="$DATA_DIR/apps-refresh-progress"
 PROGRESS_TMP="$PROGRESS.$$"
 PROGRESS_ACTIVE=0
+REFRESH_START="$(date +%s)"
+
+. "/data/adb/modules/tirnsecurity/logging-common.sh"
+AUDIT_LOG="$DATA_DIR/service.log"
 
 write_progress() {
     STATE="$1"
@@ -26,7 +30,6 @@ write_progress() {
     mv -f "$PROGRESS_TMP" "$PROGRESS"
 }
 
-trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$PROGRESS_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]*' EXIT
 
 mkdir -p "$DATA_DIR" || exit 1
 
@@ -113,7 +116,7 @@ if ! acquire_apps_lock; then
     exit 2
 fi
 
-trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$PROGRESS_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; if [ "$TIRN_REFRESH_SOURCE" = "UI" ]; then REFRESH_DURATION=$(( $(date +%s) - REFRESH_START )); if [ "$STATUS" -eq 0 ]; then log_info "Apps" "Cache manually refreshed" "UI refresh duration=${REFRESH_DURATION}s"; else log_error "Apps" "Cache refresh failed" "UI refresh duration=${REFRESH_DURATION}s status=ERROR"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$PROGRESS_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
 
 
 "$PM" list users 2>/dev/null |

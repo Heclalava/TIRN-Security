@@ -7,22 +7,26 @@ SH="/system/bin/sh"
 
 LOG="$DATA_DIR/service.log"
 EVENT="$DATA_DIR/app-watch.event"
+
+. "$MODDIR/logging-common.sh"
+AUDIT_LOG="$LOG"
+DEBUG_LOG="$DATA_DIR/debug.log"
 LOCK="$DATA_DIR/app-watch.lock"
 DEBOUNCE=2
 
 WORKER_PID=""
 
-log_msg() {
-    printf "[%s] %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" "$1" >> "$LOG"
-}
-
 refresh_cache() {
-    log_msg "Refreshing apps cache"
+    debug_log "Apps" "Cache refresh started" "startup cache refresh"
+
+    REFRESH_START="$(date +%s)"
 
     if "$SH" "$MODDIR/refresh_apps" >/dev/null 2>&1; then
-        log_msg "Apps cache refreshed"
+        REFRESH_DURATION=$(( $(date +%s) - REFRESH_START ))
+        log_info "Apps" "Cache refreshed" "application database updated duration=${REFRESH_DURATION}s"
     else
-        log_msg "ERROR: Apps cache refresh failed"
+        REFRESH_DURATION=$(( $(date +%s) - REFRESH_START ))
+        log_error "Apps" "Cache refresh failed" "application database update failed duration=${REFRESH_DURATION}s"
     fi
 }
 
@@ -36,9 +40,9 @@ queue_event() {
     [ -n "$PACKAGE" ] || return 0
 
     if "$SH" "$MODDIR/app-queue.sh" add "$ACTION" "$PACKAGE" >/dev/null 2>&1; then
-        log_msg "Queued app event: $ACTION $PACKAGE"
+        debug_log "App Watcher" "Event queued" "$ACTION $PACKAGE"
     else
-        log_msg "ERROR: Failed to queue app event: $ACTION $PACKAGE"
+        log_error "App Watcher" "Queue failed" "$ACTION $PACKAGE"
     fi
 }
 
@@ -60,21 +64,23 @@ process_queue() {
             continue
         fi
 
-        log_msg "Processing app event: $ACTION $PACKAGE"
+        debug_log "App Watcher" "Processing event" "$ACTION $PACKAGE"
 
         RESULT="$("$MODDIR/apphelper" "$ACTION" "$PACKAGE" 2>&1)"
         STATUS=$?
 
-        printf '%s\n' "$RESULT" >> "$LOG"
+        if [ -n "$RESULT" ]; then
+            debug_log "App Helper" "Command output" "$RESULT"
+        fi
 
         if [ "$STATUS" -eq 0 ]; then
             "$SH" "$MODDIR/app-queue.sh" remove >/dev/null 2>&1
-            log_msg "App event completed: $ACTION $PACKAGE"
+            log_info "Package" "Database updated" "$ACTION $PACKAGE"
         elif printf '%s\n' "$RESULT" | grep -q "APPS_BUSY"; then
-            log_msg "Apps cache busy, retrying later: $ACTION $PACKAGE"
+            debug_log "App Watcher" "Cache busy" "$ACTION $PACKAGE"
             sleep 10
         else
-            log_msg "App event failed: $ACTION $PACKAGE"
+            log_error "Package" "Database update failed" "$ACTION $PACKAGE"
             "$SH" "$MODDIR/app-queue.sh" retry >/dev/null 2>&1
             sleep 5
         fi
@@ -92,7 +98,7 @@ cleanup() {
 mkdir -p "$DATA_DIR" || exit 1
 
 if ! mkdir "$LOCK" 2>/dev/null; then
-    log_msg "App watcher already running"
+    log_warn "App Watcher" "Already running" "duplicate start ignored"
     exit 0
 fi
 
@@ -100,7 +106,7 @@ trap cleanup EXIT INT TERM HUP
 
 rm -f "$EVENT"
 
-log_msg "App watcher started"
+log_info "App Watcher" "Started" "package event monitor"
 
 refresh_cache
 
@@ -136,16 +142,10 @@ do
     while IFS= read -r line
     do
         case "$line" in
-            *PACKAGE_ADDED*|*PACKAGE_REMOVED*|*PACKAGE_REPLACED*|*PACKAGE_FULLY_REMOVED*)
-                log_msg "DEBUG package line: $line"
-                ;;
-        esac
-
-        case "$line" in
             *PACKAGE_ADDED*)
                 PACKAGE="$(printf '%s\n' "$line" | sed -n 's/.*dat=package:\([^ ]*\).*/\1/p; s/.*pkg=\([^ ]*\).*/\1/p; s/.*for package \([^ ]*\).*/\1/p')"
                 if [ -n "$PACKAGE" ]; then
-                    log_msg "Package event detected: ADDED $PACKAGE"
+                    log_info "Package" "Event detected" "ADDED $PACKAGE"
                     printf 'ADDED|%s|%s\n' "$PACKAGE" "$(date +%s)" > "$EVENT"
                     queue_event
                 fi
@@ -154,7 +154,7 @@ do
             *PACKAGE_REPLACED*)
                 PACKAGE="$(printf '%s\n' "$line" | sed -n 's/.*dat=package:\([^ ]*\).*/\1/p; s/.*pkg=\([^ ]*\).*/\1/p; s/.*for package \([^ ]*\).*/\1/p')"
                 if [ -n "$PACKAGE" ]; then
-                    log_msg "Package event detected: REPLACED $PACKAGE"
+                    log_info "Package" "Event detected" "REPLACED $PACKAGE"
                     printf 'REPLACED|%s|%s\n' "$PACKAGE" "$(date +%s)" > "$EVENT"
                     queue_event
                 fi
@@ -163,7 +163,7 @@ do
             *PACKAGE_REMOVED*|*PACKAGE_FULLY_REMOVED*)
                 PACKAGE="$(printf '%s\n' "$line" | sed -n 's/.*dat=package:\([^ ]*\).*/\1/p; s/.*pkg=\([^ ]*\).*/\1/p; s/.*for package \([^ ]*\).*/\1/p')"
                 if [ -n "$PACKAGE" ]; then
-                    log_msg "Package event detected: REMOVED $PACKAGE"
+                    log_info "Package" "Event detected" "REMOVED $PACKAGE"
                     printf 'REMOVED|%s|%s\n' "$PACKAGE" "$(date +%s)" > "$EVENT"
                     queue_event
                 fi
@@ -172,6 +172,6 @@ do
         esac
     done
 
-    log_msg "App log monitor exited, restarting"
+    log_warn "App Watcher" "Log monitor restarted" "logcat monitor exited"
     sleep 2
 done

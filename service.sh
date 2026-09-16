@@ -47,9 +47,8 @@ chmod 700 "$DATA_DIR"
 touch "$POLICY_FILE"
 chmod 600 "$POLICY_FILE"
 
-log_msg() {
-    echo "[$(/system/bin/date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
-}
+. "$MODDIR/logging-common.sh"
+AUDIT_LOG="$LOG_FILE"
 
 chain_exists() {
     "$1" -w 5 -L "$2" >/dev/null 2>&1
@@ -454,19 +453,19 @@ apply_dispatcher() {
 
         rm -f "$POLICY_STATE_FILE"
         if apply_policy; then
-            log_msg "Network dispatcher updated"
-            log_msg "Firewall policy reapplied after dispatcher update"
+            log_info "Network" "Dispatcher updated" "network configuration changed"
+            log_info "Policy" "Reapplied" "dispatcher updated"
             return 0
         fi
 
-        log_msg "ERROR: Firewall policy reapply failed after dispatcher update"
+        log_error "Policy" "Reapply failed" "dispatcher updated"
         restore_fail_open
         return 1
     fi
 
     rm -f "$TMP_STATE"
     restore_fail_open
-    log_msg "ERROR: Network dispatcher rebuild failed; fail-open restored"
+    log_error "Network" "Dispatcher rebuild failed" "fail-open restored"
     return 1
 }
 
@@ -503,7 +502,7 @@ validate_policy() {
         esac
 
         if [ -n "$EXTRA" ] || ! policy_line_valid "$UID_VALUE" "$NETWORK" "$ACTION"; then
-            log_msg "ERROR: Invalid policy line $LINE_NO"
+            log_error "Policy" "Validation failed" "invalid policy line $LINE_NO"
             return 1
         fi
     done < "$POLICY_FILE"
@@ -532,7 +531,7 @@ restore_policy_fail_open() {
 apply_policy() {
     if ! validate_policy; then
         restore_policy_fail_open
-        log_msg "ERROR: Invalid policy; fail-open policy restored"
+        log_error "Policy" "Validation failed" "fail-open policy restored"
         return 1
     fi
 
@@ -609,52 +608,55 @@ apply_policy() {
     mv -f "$TMP_POLICY" "$POLICY_STATE_FILE"
     chmod 600 "$POLICY_STATE_FILE"
 
-    log_msg "Firewall policy updated"
+    log_info "Policy" "Applied" "$(wc -l < "$POLICY_STATE_FILE" 2>/dev/null | tr -d " ") rules"
     return 0
 }
 
 if [ "${1:-}" = "--refresh" ]; then
-    log_msg "=== TIRN Security Refresh Requested ==="
+    log_info "Refresh" "Started" "manual refresh requested"
     FAILED=0
     if setup_base_ipv4; then
-        log_msg "IPv4 firewall framework refreshed"
+        log_info "Firewall" "IPv4 framework refreshed"
     else
-        log_msg "ERROR: IPv4 firewall framework refresh failed"
+        log_error "Firewall" "IPv4 framework refresh failed"
         FAILED=1
     fi
     if setup_base_ipv6; then
-        log_msg "IPv6 firewall framework refreshed"
+        log_info "Firewall" "IPv6 framework refreshed"
     else
-        log_msg "ERROR: IPv6 firewall framework refresh failed"
+        log_error "Firewall" "IPv6 framework refresh failed"
         FAILED=1
     fi
     rm -f "$STATE_FILE"
     if apply_dispatcher; then
-        log_msg "Network dispatcher refreshed"
+        log_info "Network" "Dispatcher refreshed" "manual refresh"
     else
-        log_msg "ERROR: Network dispatcher refresh failed"
+        log_error "Network" "Dispatcher refresh failed"
         FAILED=1
     fi
     rm -f "$POLICY_STATE_FILE"
     if apply_policy; then
-        log_msg "Firewall policy reapplied"
+        log_info "Policy" "Reapplied" "manual refresh"
     else
-        log_msg "ERROR: Firewall policy refresh failed"
+        log_error "Policy" "Refresh failed"
         FAILED=1
     fi
     if [ "$FAILED" -eq 0 ]; then
+        REFRESH_START="$(date +%s)"
         if /system/bin/sh "$MODDIR/refresh_apps" >/dev/null 2>&1; then
-            log_msg "Apps cache refreshed"
+            REFRESH_DURATION=$(( $(date +%s) - REFRESH_START ))
+            log_info "Apps" "Cache refreshed" "manual refresh duration=${REFRESH_DURATION}s"
         else
-            log_msg "ERROR: Apps cache refresh failed"
+            REFRESH_DURATION=$(( $(date +%s) - REFRESH_START ))
+            log_error "Apps" "Cache refresh failed" "manual refresh duration=${REFRESH_DURATION}s"
             FAILED=1
         fi
     fi
     if [ "$FAILED" -eq 0 ]; then
-        log_msg "=== TIRN Security Refresh Complete ==="
+        log_info "Refresh" "Completed" "all operations succeeded"
         exit 0
     fi
-    log_msg "=== TIRN Security Refresh Failed ==="
+    log_error "Refresh" "Failed" "one or more operations failed"
     exit 1
 fi
 
@@ -663,39 +665,39 @@ if [ "${1:-}" = "--policy-event" ]; then
     exit $?
 fi
 
-log_msg "=== TIRN Security Activated ==="
+log_info "Service" "Started" "module initialization"
 
 sleep 10
 
 if setup_base_ipv4; then
-    log_msg "IPv4 firewall framework initialized"
+    log_info "Firewall" "IPv4 framework initialized"
 else
-    log_msg "ERROR: IPv4 firewall framework initialization failed"
+    log_error "Firewall" "IPv4 framework initialization failed"
 fi
 
 if setup_base_ipv6; then
-    log_msg "IPv6 firewall framework initialized"
+    log_info "Firewall" "IPv6 framework initialized"
 else
-    log_msg "ERROR: IPv6 firewall framework initialization failed"
+    log_error "Firewall" "IPv6 framework initialization failed"
 fi
 
 rm -f "$STATE_FILE"
 
 if apply_dispatcher; then
-    log_msg "Network dispatcher initialized"
+    log_info "Network" "Dispatcher initialized"
 else
-    log_msg "ERROR: Network dispatcher initialization failed"
+    log_error "Network" "Dispatcher initialization failed"
 fi
 
 rm -f "$POLICY_STATE_FILE"
 
 if apply_policy; then
-    log_msg "Firewall policy initialized"
+    log_info "Policy" "Initialized"
 else
-    log_msg "ERROR: Firewall policy initialization failed"
+    log_error "Policy" "Initialization failed"
 fi
 
-log_msg "=== TIRN Security Ready (Phase 3, fail-open) ==="
+log_info "Service" "Ready" "fail-open mode"
 
 "$MODDIR/policy-watch.sh" "$POLICY_FILE:w" "$DATA_DIR:nm" >/dev/null 2>&1 &
 POLICY_WATCH_PID=$!
