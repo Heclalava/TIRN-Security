@@ -548,6 +548,7 @@ button{color:inherit}
   <div id="mainMenu" class="main-menu">
     <button onclick="hideMainMenu();refreshAppCache()">Refresh app cache</button>
     <button onclick="hideMainMenu();downloadLogs()">Download logs</button>
+    <button class="danger" onclick="hideMainMenu();showClearLogsConfirm()">Clear logs</button>
     <button onclick="exportBackup();hideMainMenu()">Export policy</button>
     <button onclick="document.getElementById('importFile').click();hideMainMenu()">Import policy</button>
     <button class="danger" onclick="hideMainMenu();clearAll()">Clear all blocks</button>
@@ -650,6 +651,17 @@ button{color:inherit}
     <p>This will remove all TIRN Security policy rules. No Android firewall chains are modified by this operation.</p>
     <button class="danger" onclick="confirmClearAll()">Clear all blocks</button>
     <button onclick="hideClearConfirm()">Cancel</button>
+  </div>
+</div>
+
+<div id="clearLogsBack" class="modal-back">
+  <div class="modal">
+    <h2 id="clearLogsTitle">Clear TIRN Security logs?</h2>
+    <p id="clearLogsMessage">This will clear the service and debug logs. Installation logs and policy data will not be changed.</p>
+    <p id="clearLogsError" class="bulk-progress-error"></p>
+    <button id="clearLogsConfirm" class="danger" onclick="confirmClearLogs()">Clear logs</button>
+    <button id="clearLogsCancel" onclick="hideClearLogsConfirm()">Cancel</button>
+    <button id="clearLogsClose" onclick="hideClearLogsResult()" style="display:none">Close</button>
   </div>
 </div>
 
@@ -1438,6 +1450,70 @@ function showClearConfirm(){
 
 function hideClearConfirm(){
   document.getElementById("clearConfirmBack").style.display="none";
+}
+
+function showClearLogsConfirm(){
+  const back=document.getElementById("clearLogsBack");
+  const title=document.getElementById("clearLogsTitle");
+  const message=document.getElementById("clearLogsMessage");
+  const error=document.getElementById("clearLogsError");
+  const confirm=document.getElementById("clearLogsConfirm");
+  const cancel=document.getElementById("clearLogsCancel");
+  const close=document.getElementById("clearLogsClose");
+
+  title.textContent="Clear TIRN Security logs?";
+  message.textContent="This will clear the service and debug logs. Installation logs and policy data will not be changed.";
+  error.textContent="";
+  confirm.style.display="";
+  confirm.disabled=false;
+  cancel.style.display="";
+  cancel.disabled=false;
+  close.style.display="none";
+  back.style.display="flex";
+}
+
+function hideClearLogsConfirm(){
+  const back=document.getElementById("clearLogsBack");
+  const confirm=document.getElementById("clearLogsConfirm");
+  if(confirm.disabled)return;
+  back.style.display="none";
+}
+
+function hideClearLogsResult(){
+  document.getElementById("clearLogsBack").style.display="none";
+}
+
+async function confirmClearLogs(){
+  const title=document.getElementById("clearLogsTitle");
+  const message=document.getElementById("clearLogsMessage");
+  const error=document.getElementById("clearLogsError");
+  const confirm=document.getElementById("clearLogsConfirm");
+  const cancel=document.getElementById("clearLogsCancel");
+  const close=document.getElementById("clearLogsClose");
+
+  confirm.disabled=true;
+  cancel.disabled=true;
+  confirm.style.display="none";
+  cancel.style.display="none";
+  close.style.display="none";
+  title.textContent="Clearing TIRN Security logs…";
+  message.textContent="Clearing service.log and debug.log…";
+  error.textContent="";
+  setTaskStatus("CLEARING LOGS");
+
+  try{
+    await api("/logs-clear");
+    title.textContent="Logs cleared";
+    message.textContent="TIRN Security service.log and debug.log were cleared successfully.";
+    error.textContent="";
+  }catch(e){
+    title.textContent="Failed to clear logs";
+    message.textContent="TIRN Security could not clear the requested logs.";
+    error.textContent=e.message||"Unknown error";
+  }finally{
+    setTaskStatus("READY");
+    close.style.display="";
+  }
 }
 
 async function confirmClearAll(){
