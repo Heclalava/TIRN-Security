@@ -953,8 +953,75 @@ prepare_policy() {
     return 0
 }
 bootstrap_existing_install() {
-    log_error "Firewall" "Existing install bootstrap not implemented"         "waiting for policy restore path"
-    return 1
+    if ! acquire_firewall_lock; then
+        log_error "Firewall" "Existing install bootstrap failed"             "firewall lock unavailable"
+        return 1
+    fi
+
+    if ! refresh_apps_bootstrap; then
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed"             "app cache unavailable"
+        return 1
+    fi
+
+    TMP_STATE="$DATA_DIR/network.state.bootstrap.$$"
+    PREPARED_POLICY="$DATA_DIR/policy.prepared.bootstrap.$$"
+    PREPARED_COUNT="$DATA_DIR/policy.count.bootstrap.$$"
+
+    rm -f "$TMP_STATE" "$PREPARED_POLICY" "$PREPARED_COUNT"
+
+    if ! build_network_state > "$TMP_STATE"; then
+        rm -f "$TMP_STATE" "$PREPARED_POLICY" "$PREPARED_COUNT"
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed"             "network state build failed"
+        return 1
+    fi
+
+    if ! prepare_policy "$PREPARED_POLICY" "$PREPARED_COUNT"; then
+        rm -f "$TMP_STATE" "$PREPARED_POLICY" "$PREPARED_COUNT"
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed"             "policy preparation failed"
+        return 1
+    fi
+
+    if ! generation_switch_transaction "$TMP_STATE" "$PREPARED_POLICY"; then
+        rm -f "$TMP_STATE" "$PREPARED_POLICY" "$PREPARED_COUNT"
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed"             "generation transaction failed"
+        return 1
+    fi
+
+    if ! mv -f "$TMP_STATE" "$STATE_FILE"; then
+        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed" \
+            "network state commit failed"
+        return 1
+    fi
+
+    if ! cp -f "$PREPARED_POLICY" "$POLICY_STATE_FILE"; then
+        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed" \
+            "applied policy commit failed"
+        return 1
+    fi
+
+    if ! chmod 600 "$POLICY_STATE_FILE"; then
+        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed" \
+            "applied policy permissions failed"
+        return 1
+    fi
+
+    rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
+
+    release_firewall_lock
+
+    log_info "Firewall" "Existing install bootstrap completed"         "verified generation activated"
+
+    return 0
 }
 
 refresh_apps_bootstrap()
