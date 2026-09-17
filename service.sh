@@ -1556,7 +1556,7 @@ EOF
     fi
 
     if [ "$GUARD_COUNT" -eq 1 ]; then
-        if [ "$GENERATION_POSITION" -ne 2 ]; then
+        if [ "$GENERATION_POSITION" -ne 1 ]; then
             log_error "DEBUG" "stable dispatcher generation position failed with guard" "position=$GENERATION_POSITION rules=$RULES"
             return 1
         fi
