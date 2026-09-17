@@ -20,7 +20,7 @@ echo "=== BUILD RUNTIME HELPERS ==="
 
 (
     cd tools/apphelper
-    GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o apphelper-arm64 .
+    GO111MODULE=off GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o apphelper-arm64 .
 )
 
 echo "=== VERIFY TRACKED RUNTIME HELPERS ==="
