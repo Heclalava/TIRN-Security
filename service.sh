@@ -182,6 +182,13 @@ generation_delete_family() {
     WIFI="$(generation_wifi_chain "$GEN")"
     LAN="$(generation_lan_chain "$GEN")"
 
+    if ! generation_chain_exists "$IPT" "$DISP" &&
+       ! generation_chain_exists "$IPT" "$MOB" &&
+       ! generation_chain_exists "$IPT" "$WIFI" &&
+       ! generation_chain_exists "$IPT" "$LAN"; then
+        return 0
+    fi
+
     "$IPT" -w 5 -F "$MOB" || return 1
     "$IPT" -w 5 -F "$WIFI" || return 1
     "$IPT" -w 5 -F "$LAN" || return 1
@@ -220,6 +227,12 @@ generation_verify_family() {
     WIFI_RULES="$("$IPT" -w 5 -S "$WIFI" 2>/dev/null)" || return 1
     LAN_RULES="$("$IPT" -w 5 -S "$LAN" 2>/dev/null)" || return 1
 
+    log_error "DEBUG" "verify family chains" "family=$FAMILY mob=$MOB wifi=$WIFI lan=$LAN"
+    log_error "DEBUG" "mob rules" "rules=$(printf '%s' "$MOB_RULES" | tr '\\n' ';')"
+    log_error "DEBUG" "wifi rules" "rules=$(printf '%s' "$WIFI_RULES" | tr '\\n' ';')"
+    log_error "DEBUG" "lan rules" "rules=$(printf '%s' "$LAN_RULES" | tr '\\n' ';')"
+    log_error "DEBUG" "disp rules" "rules=$(printf '%s' "$DISP_RULES" | tr '\\n' ';')"
+
     # Every network policy chain must contain only TIRN-generated
     # owner DROP rules followed by exactly one final RETURN.
     for CHAIN in "$MOB" "$WIFI" "$LAN"; do
@@ -237,6 +250,9 @@ generation_verify_family() {
             [ -n "$RULE" ] || continue
 
             case "$RULE" in
+                "-N $CHAIN")
+                    continue
+                    ;;
                 "-A $CHAIN -m owner --uid-owner "[0-9]*" -j DROP")
                     ;;
                 "-A $CHAIN -j RETURN")
@@ -265,6 +281,9 @@ EOF
         [ -n "$RULE" ] || continue
 
         case "$RULE" in
+            "-N $DISP")
+                continue
+                ;;
             "-A $DISP -o "*"-j $MOB")
                 ;;
             "-A $DISP -o "*"-j $WIFI")
@@ -472,6 +491,9 @@ generation_guard_verify() {
     while IFS= read -r RULE; do
         [ -n "$RULE" ] || continue
         case "$RULE" in
+            "-N $GENERATION_GUARD_CHAIN")
+                continue
+                ;;
             "-A $GENERATION_GUARD_CHAIN -j DROP")
                 IPV4_RULE_COUNT=$((IPV4_RULE_COUNT + 1))
                 ;;
@@ -486,6 +508,9 @@ EOF
     while IFS= read -r RULE; do
         [ -n "$RULE" ] || continue
         case "$RULE" in
+            "-N $GENERATION_GUARD_CHAIN")
+                continue
+                ;;
             "-A $GENERATION_GUARD_CHAIN -j DROP")
                 IPV6_RULE_COUNT=$((IPV6_RULE_COUNT + 1))
                 ;;
@@ -555,6 +580,7 @@ bootstrap_main_chain_fail_closed_family() {
 
     RULES="$("$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
 
+
     DROP_COUNT=0
     RETURN_COUNT=0
     OTHER_COUNT=0
@@ -563,6 +589,9 @@ bootstrap_main_chain_fail_closed_family() {
         [ -n "$RULE" ] || continue
 
         case "$RULE" in
+            "-N $MAIN_CHAIN")
+                continue
+                ;;
             "-A $MAIN_CHAIN -j DROP")
                 DROP_COUNT=$((DROP_COUNT + 1))
                 ;;
@@ -621,6 +650,12 @@ bootstrap_output_hook_family() {
         [ -n "$RULE" ] || continue
 
         case "$RULE" in
+            "-N OUTPUT")
+                continue
+                ;;
+        esac
+
+        case "$RULE" in
             "-A OUTPUT "*)
                 POSITION=$((POSITION + 1))
 
@@ -658,6 +693,12 @@ EOF
 
     while IFS= read -r RULE; do
         [ -n "$RULE" ] || continue
+
+        case "$RULE" in
+            "-N OUTPUT")
+                continue
+                ;;
+        esac
 
         case "$RULE" in
             "-A OUTPUT "*)
@@ -708,6 +749,13 @@ bootstrap_verify_existing_family() {
 
     while IFS= read -r RULE; do
         [ -n "$RULE" ] || continue
+
+        case "$RULE" in
+            "-N OUTPUT")
+                continue
+                ;;
+        esac
+
         case "$RULE" in
             "-A OUTPUT "*)
                 POSITION=$((POSITION + 1))
@@ -728,18 +776,214 @@ EOF
     return 0
 }
 
+prepare_policy() {
+    PREPARED_POLICY="$1"
+    PREPARED_COUNT="$2"
+
+    TMP_MAP="$DATA_DIR/apps.uidmap.$$"
+    TMP_PREPARED="$PREPARED_POLICY.tmp.$$"
+    TMP_NORMALIZED="$PREPARED_POLICY.normalized.$$"
+
+    rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
+
+    if [ ! -f "$DATA_DIR/apps.json" ]; then
+        log_error "Policy" "Preparation failed" "apps cache missing"
+        return 1
+    fi
+
+    if ! sed 's/},{/}\n{/g' "$DATA_DIR/apps.json" |
+        awk '
+            {
+                user = ""
+                pkg = ""
+                uid = ""
+
+                if (match($0, /"user":"[0-9]+"/)) {
+                    x = substr($0, RSTART, RLENGTH)
+                    sub(/^"user":"/, "", x)
+                    sub(/"$/, "", x)
+                    user = x
+                }
+
+                if (match($0, /"pkg":"[^"]+"/)) {
+                    x = substr($0, RSTART, RLENGTH)
+                    sub(/^"pkg":"/, "", x)
+                    sub(/"$/, "", x)
+                    pkg = x
+                }
+
+                if (match($0, /"uid":"[0-9]+"/)) {
+                    x = substr($0, RSTART, RLENGTH)
+                    sub(/^"uid":"/, "", x)
+                    sub(/"$/, "", x)
+                    uid = x
+                }
+
+                if (user != "" && pkg != "" && uid != "")
+                    print user "|" pkg "|" uid
+            }
+        ' > "$TMP_MAP"; then
+        rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
+        log_error "Policy" "Preparation failed" "unable to build app UID map"
+        return 1
+    fi
+
+    if ! awk -F'|' '
+        FILENAME == ARGV[1] {
+            if (NF == 3)
+                app_uid[$1 SUBSEP $2] = $3
+            next
+        }
+
+        FILENAME == ARGV[2] {
+            line_no++
+
+            if ($0 ~ /^[[:space:]]*#/)
+                next
+
+            if ($0 ~ /^[[:space:]]*$/)
+                next
+
+            if (NF != 5) {
+                error = "invalid field count on line " line_no
+                exit 2
+            }
+
+            user = $1
+            pkg = $2
+            uid = $3
+            network = $4
+            action = $5
+
+            if (user !~ /^[0-9]+$/ || user > 2147483647) {
+                error = "invalid user on line " line_no
+                exit 2
+            }
+
+            if (pkg !~ /^[A-Za-z0-9._-]+$/) {
+                error = "invalid package on line " line_no
+                exit 2
+            }
+
+            if (uid !~ /^[0-9]+$/ || uid < 1 || uid > 2147483647) {
+                error = "invalid UID on line " line_no
+                exit 2
+            }
+
+            if (network != "MOBILE" &&
+                network != "WIFI" &&
+                network != "LAN") {
+                error = "invalid network on line " line_no
+                exit 2
+            }
+
+            if (action != "BLOCK") {
+                error = "invalid action on line " line_no
+                exit 2
+            }
+
+            key = user SUBSEP pkg
+
+            if (!(key in app_uid)) {
+                error = "unresolved app on line " line_no
+                exit 2
+            }
+
+            if (app_uid[key] != uid) {
+                error = "UID mismatch on line " line_no
+                exit 2
+            }
+
+            print user "|" pkg "|" uid "|" network "|" action
+            next
+        }
+
+        END {
+            if (error != "") {
+                print error > "/dev/stderr"
+                exit 2
+            }
+        }
+    ' "$TMP_MAP" "$POLICY_FILE" > "$TMP_NORMALIZED"; then
+        rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
+        log_error "Policy" "Preparation failed" "policy validation or UID resolution failed"
+        return 1
+    fi
+
+    if ! sort -u "$TMP_NORMALIZED" > "$TMP_PREPARED"; then
+        rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
+        log_error "Policy" "Preparation failed" "unable to sort prepared policy"
+        return 1
+    fi
+
+    rm -f "$TMP_MAP" "$TMP_NORMALIZED"
+
+    if ! mv -f "$TMP_PREPARED" "$PREPARED_POLICY"; then
+        rm -f "$TMP_PREPARED" "$PREPARED_POLICY"
+        log_error "Policy" "Preparation failed" "unable to finalize prepared policy"
+        return 1
+    fi
+
+    PREPARED_RULE_COUNT="$(wc -l < "$PREPARED_POLICY" 2>/dev/null)"
+    PREPARED_RULE_COUNT="$(printf "%s" "$PREPARED_RULE_COUNT" | tr -d " ")"
+
+    printf "%s\n" "$PREPARED_RULE_COUNT" > "$PREPARED_COUNT"
+
+    log_info "Policy" "Prepared" "rules=$PREPARED_RULE_COUNT"
+    return 0
+}
+bootstrap_existing_install() {
+    log_error "Firewall" "Existing install bootstrap not implemented"         "waiting for policy restore path"
+    return 1
+}
+
+refresh_apps_bootstrap()
+{
+    log_info "Apps" "Cache refresh started" "bootstrap"
+
+    if ! /system/bin/sh "$MODDIR/refresh_apps" >/dev/null 2>&1; then
+        log_error "Apps" "Cache refresh failed" "bootstrap"
+        return 1
+    fi
+
+    TIMEOUT=180
+    ELAPSED=0
+
+    while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+        if [ -s "$DATA_DIR/apps.json" ]; then
+            log_info "Apps" "Cache ready" "bootstrap"
+            return 0
+        fi
+
+        sleep 2
+        ELAPSED=$((ELAPSED + 2))
+    done
+
+    log_error "Apps" "Cache refresh timeout" \
+        "apps.json not available after ${TIMEOUT}s"
+
+    return 1
+}
+
 bootstrap_initialize() {
+    if [ -f "$POLICY_STATE_FILE" ] &&
+       [ -f "$STATE_FILE" ]; then
+        bootstrap_existing_install
+    else
+        bootstrap_fresh_install
+    fi
+}
+
+bootstrap_fresh_install() {
     if ! acquire_firewall_lock; then
         log_error "Firewall" "Bootstrap failed" "firewall lock unavailable"
         return 1
     fi
 
-    # First preserve any already-healthy firewall exactly as it is.
-    if bootstrap_verify_existing_family ipv4 &&
-       bootstrap_verify_existing_family ipv6; then
+    if ! refresh_apps_bootstrap; then
         release_firewall_lock
-        log_info "Firewall" "Bootstrap preserved" "existing generation verified"
-        return 0
+        log_error "Firewall" "Bootstrap failed" "app cache unavailable"
+        return 1
     fi
 
     # Establish only the TIRN-owned main chains. Existing chains are never flushed.
@@ -1135,8 +1379,15 @@ generation_populate_family() {
 generation_verify_complete() {
     GEN="$1"
 
-    generation_verify_family "$GEN" ipv4 || return 1
-    generation_verify_family "$GEN" ipv6 || return 1
+    if ! generation_verify_family "$GEN" ipv4; then
+        log_error "DEBUG" "verify ipv4 failed" "generation=$GEN"
+        return 1
+    fi
+
+    if ! generation_verify_family "$GEN" ipv6; then
+        log_error "DEBUG" "verify ipv6 failed" "generation=$GEN"
+        return 1
+    fi
 
     return 0
 }
@@ -1162,6 +1413,9 @@ generation_verify_dispatcher_family() {
 
     while IFS= read -r RULE; do
         case "$RULE" in
+            "-N $DISP")
+                continue
+                ;;
             "-A $DISP -j RETURN")
                 RETURN_COUNT=$((RETURN_COUNT + 1))
                 ;;
@@ -1178,6 +1432,7 @@ generation_verify_dispatcher_family() {
             "")
                 ;;
             *)
+                log_error "DEBUG" "dispatcher unexpected rule" "family=$FAMILY rule=$RULE"
                 return 1
                 ;;
         esac
@@ -1225,6 +1480,12 @@ generation_verify_stable_dispatcher_family() {
 
     while IFS= read -r RULE; do
         [ -n "$RULE" ] || continue
+
+        case "$RULE" in
+            "-N $MAIN_CHAIN")
+                continue
+                ;;
+        esac
 
         POSITION=$((POSITION + 1))
 
@@ -1325,6 +1586,12 @@ generation_remove_legacy_dispatcher_rules() {
     RULES="$("$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
 
     while IFS= read -r RULE; do
+        case "$RULE" in
+            "-N $MAIN_CHAIN")
+                continue
+                ;;
+        esac
+
         case "$RULE" in
             "-A $MAIN_CHAIN -j $GENERATION_GUARD_CHAIN")
                 continue
@@ -1476,12 +1743,19 @@ generation_switch_transaction() {
     for BUILD_ATTEMPT in 1 2; do
         generation_transaction_cleanup_new "$NEW_GEN"
 
-        if generation_create_family "$NEW_GEN" ipv4 &&
-           generation_create_family "$NEW_GEN" ipv6 &&
-           generation_populate_family "$NEW_GEN" ipv4                "$PREPARED_POLICY" "$NEW_STATE" &&
-           generation_populate_family "$NEW_GEN" ipv6                "$PREPARED_POLICY" "$NEW_STATE" &&
-           generation_verify_complete "$NEW_GEN" &&
-           generation_verify_dispatcher_complete "$NEW_GEN"; then
+        if ! generation_create_family "$NEW_GEN" ipv4; then
+            log_error "DEBUG" "create ipv4 failed" "generation=$NEW_GEN"
+        elif ! generation_create_family "$NEW_GEN" ipv6; then
+            log_error "DEBUG" "create ipv6 failed" "generation=$NEW_GEN"
+        elif ! generation_populate_family "$NEW_GEN" ipv4 "$PREPARED_POLICY" "$NEW_STATE"; then
+            log_error "DEBUG" "populate ipv4 failed" "generation=$NEW_GEN"
+        elif ! generation_populate_family "$NEW_GEN" ipv6 "$PREPARED_POLICY" "$NEW_STATE"; then
+            log_error "DEBUG" "populate ipv6 failed" "generation=$NEW_GEN"
+        elif ! generation_verify_complete "$NEW_GEN"; then
+            log_error "DEBUG" "verify complete failed" "generation=$NEW_GEN"
+        elif ! generation_verify_dispatcher_complete "$NEW_GEN"; then
+            log_error "DEBUG" "verify dispatcher failed" "generation=$NEW_GEN"
+        else
             BUILD_OK=1
             break
         fi
