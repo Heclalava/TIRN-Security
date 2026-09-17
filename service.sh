@@ -1702,8 +1702,8 @@ generation_restore_old() {
     OLD4="$2"
     OLD6="$3"
 
-    NEW4="TIRNFW-G${NEW_GEN}"
-    NEW6="TIRNFW-G${NEW_GEN}"
+    NEW4="$(generation_dispatcher_chain "$NEW_GEN")"
+    NEW6="$(generation_dispatcher_chain "$NEW_GEN")"
 
     log_warn "Firewall" "Generation rollback started" \
         "new=$NEW_GEN old4=${OLD4:-none} old6=${OLD6:-none}"
