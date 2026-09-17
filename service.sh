@@ -469,7 +469,30 @@ apply_dispatcher() {
     return 1
 }
 
-policy_line_valid() {
+resolve_policy_app_uid() {
+    POLICY_USER="$1"
+    POLICY_PACKAGE="$2"
+
+    [ -f "$DATA_DIR/apps.json" ] || return 1
+
+    RECORD="$(
+        sed 's/},{/}\n{/g' "$DATA_DIR/apps.json" |
+        awk -v user="$POLICY_USER" -v pkg="$POLICY_PACKAGE" '
+            index($0, "\"user\":\"" user "\"") &&
+            index($0, "\"pkg\":\"" pkg "\"") {
+                print
+                exit
+            }
+        '
+    )"
+
+    [ -n "$RECORD" ] || return 1
+
+    printf '%s\n' "$RECORD" |
+        sed -n 's/.*"uid":"\([0-9][0-9]*\)".*/\1/p'
+}
+
+policy_line_valid_legacy() {
     UID_VALUE="$1"
     NETWORK="$2"
     ACTION="$3"
@@ -478,7 +501,8 @@ policy_line_valid() {
         ''|*[!0-9]*) return 1 ;;
     esac
 
-    [ "$UID_VALUE" -ge 1 ] 2>/dev/null && [ "$UID_VALUE" -le 2147483647 ] 2>/dev/null || return 1
+    [ "$UID_VALUE" -ge 1 ] 2>/dev/null &&
+    [ "$UID_VALUE" -le 2147483647 ] 2>/dev/null || return 1
 
     case "$NETWORK" in
         MOBILE|WIFI|LAN) ;;
@@ -490,18 +514,74 @@ policy_line_valid() {
     return 0
 }
 
+policy_line_valid_package() {
+    POLICY_USER="$1"
+    POLICY_PACKAGE="$2"
+    UID_VALUE="$3"
+    NETWORK="$4"
+    ACTION="$5"
+
+    case "$POLICY_USER" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    [ "$POLICY_USER" -le 2147483647 ] 2>/dev/null || return 1
+
+    case "$POLICY_PACKAGE" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+
+    case "$UID_VALUE" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    [ "$UID_VALUE" -ge 1 ] 2>/dev/null &&
+    [ "$UID_VALUE" -le 2147483647 ] 2>/dev/null || return 1
+
+    case "$NETWORK" in
+        MOBILE|WIFI|LAN) ;;
+        *) return 1 ;;
+    esac
+
+    [ "$ACTION" = "BLOCK" ] || return 1
+
+    RESOLVED_UID="$(resolve_policy_app_uid "$POLICY_USER" "$POLICY_PACKAGE")"
+
+    [ -n "$RESOLVED_UID" ] || return 1
+    [ "$RESOLVED_UID" = "$UID_VALUE" ] || return 1
+
+    return 0
+}
+
 validate_policy() {
     LINE_NO=0
 
-    while IFS='|' read -r UID_VALUE NETWORK ACTION EXTRA; do
+    while IFS='|' read -r FIELD1 FIELD2 FIELD3 FIELD4 FIELD5 EXTRA; do
         LINE_NO=$((LINE_NO + 1))
 
-        [ -z "$UID_VALUE$NETWORK$ACTION$EXTRA" ] && continue
-        case "$UID_VALUE" in
+        [ -z "$FIELD1$FIELD2$FIELD3$FIELD4$FIELD5$EXTRA" ] && continue
+
+        case "$FIELD1" in
             \#*) continue ;;
         esac
 
-        if [ -n "$EXTRA" ] || ! policy_line_valid "$UID_VALUE" "$NETWORK" "$ACTION"; then
+        if [ -n "$EXTRA" ]; then
+            log_error "Policy" "Validation failed" "invalid policy line $LINE_NO"
+            return 1
+        fi
+
+        if [ -n "$FIELD5" ]; then
+            if ! policy_line_valid_package \
+                "$FIELD1" "$FIELD2" "$FIELD3" "$FIELD4" "$FIELD5"; then
+                log_error "Policy" "Validation failed" "invalid or unresolved policy line $LINE_NO"
+                return 1
+            fi
+        elif [ -n "$FIELD3" ]; then
+            if ! policy_line_valid_legacy "$FIELD1" "$FIELD2" "$FIELD3"; then
+                log_error "Policy" "Validation failed" "invalid legacy policy line $LINE_NO"
+                return 1
+            fi
+        else
             log_error "Policy" "Validation failed" "invalid policy line $LINE_NO"
             return 1
         fi
@@ -540,7 +620,13 @@ apply_policy() {
     awk -F'|' '
         /^[[:space:]]*#/ {next}
         NF == 0 {next}
-        NF == 3 {printf "%.0f|%s|%s\n", $1 + 0, $2, $3}
+        NF == 3 {
+            printf "%.0f|%s|%s\n", $1 + 0, $2, $3
+            next
+        }
+        NF == 5 {
+            printf "%.0f|%s|%.0f|%s|%s\n", $1 + 0, $2, $3 + 0, $4, $5
+        }
     ' "$POLICY_FILE" | sort -u > "$TMP_POLICY"
 
     if [ -f "$POLICY_STATE_FILE" ] && cmp -s "$TMP_POLICY" "$POLICY_STATE_FILE"; then
@@ -556,7 +642,17 @@ apply_policy() {
     ip6t -F "$WIFI_CHAIN" || { rm -f "$TMP_POLICY"; restore_policy_fail_open; return 1; }
     ip6t -F "$LAN_CHAIN" || { rm -f "$TMP_POLICY"; restore_policy_fail_open; return 1; }
 
-    while IFS='|' read -r UID_VALUE NETWORK ACTION; do
+    while IFS='|' read -r FIELD1 FIELD2 FIELD3 FIELD4 FIELD5; do
+        if [ -n "$FIELD5" ]; then
+            UID_VALUE="$FIELD3"
+            NETWORK="$FIELD4"
+            ACTION="$FIELD5"
+        else
+            UID_VALUE="$FIELD1"
+            NETWORK="$FIELD2"
+            ACTION="$FIELD3"
+        fi
+
         case "$NETWORK" in
             MOBILE)
                 ipt -A "$MOBILE_CHAIN" -m owner --uid-owner "$UID_VALUE" -j DROP || {

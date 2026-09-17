@@ -739,7 +739,7 @@ async function loadPolicy(){
         ["MOBILE","WIFI","LAN"].includes(r.network) &&
         r.action==="BLOCK"
       ){
-        policy.set(String(r.uid)+"|"+r.network,true);
+        policy.set(String(r.user)+"|"+String(r.pkg)+"|"+String(r.uid)+"|"+r.network,true);
       }
     });
   }
@@ -747,30 +747,31 @@ async function loadPolicy(){
   updateRuleCount();
 }
 
-async function postPolicy(uid,network,action){
+async function postPolicy(user,pkg,uid,network,action){
   return api("/policy",{
     method:"POST",
     headers:{
-      "Content-Type":"application/json"
+      "Content-Type":"application/x-www-form-urlencoded"
     },
-    body:JSON.stringify({
-      uid:String(uid),
+    body:new URLSearchParams({
+      user:String(user),
+      pkg:String(pkg),
       network:network,
       action:action
-    })
+    }).toString()
   });
 }
 
-async function setPolicy(uid,network,blocked){
+async function setPolicy(user,pkg,uid,network,blocked){
   if(writeBusy)return;
 
   writeBusy=true;
 
   try{
-    const key=String(uid)+"|"+network;
+    const key=String(user)+"|"+String(pkg)+"|"+String(uid)+"|"+network;
     const action=blocked?"BLOCK":"ALLOW";
 
-    await postPolicy(uid,network,action);
+    await postPolicy(user,pkg,uid,network,action);
 
     if(blocked){
       policy.set(key,true);
@@ -993,14 +994,14 @@ function visibleApps(){
     if(appFilter==="user"&&a.system)return false;
     if(appFilter==="system"&&!a.system)return false;
     if(appFilter==="blocked" &&
-       !["MOBILE","WIFI","LAN"].some(n=>blocked(a.uid,n)))return false;
+       !["MOBILE","WIFI","LAN"].some(n=>blocked(a,n)))return false;
     if(q&&!((a.name+" "+a.pkg).toLowerCase().includes(q)))return false;
     return true;
   });
 }
 
-function blocked(uid,n){
-  return policy.has(String(uid)+"|"+n);
+function blocked(a,n){
+  return policy.has(String(a.user)+"|"+String(a.pkg)+"|"+String(a.uid)+"|"+n);
 }
 
 function render(){
@@ -1052,7 +1053,7 @@ function render(){
 }
 
 function cell(a,n,label){
-  const b=blocked(a.uid,n);
+  const b=blocked(a,n);
 
   return(
     '<label class="cell" title="'+
@@ -1077,6 +1078,9 @@ function cell(a,n,label){
 
 async function cellChange(uid,n,b,el){
   const row=el.closest(".app-row");
+  const appKey=row.dataset.key.split("|");
+  const user=appKey[0];
+  const pkg=appKey.slice(1).join("|");
   const dot=el.nextElementSibling;
 
   const scrollBox=document.getElementById("appRows");
@@ -1085,7 +1089,7 @@ async function cellChange(uid,n,b,el){
   el.disabled=true;
 
   try{
-    await setPolicy(uid,n,b);
+    await setPolicy(user,pkg,uid,n,b);
 
     dot.textContent=b?"":"";
     dot.parentElement.title=
@@ -1131,9 +1135,9 @@ async function bulkNetwork(n,action){
 
   try{
     for(const a of rows){
-      await postPolicy(a.uid,n,action);
+      await postPolicy(a.user,a.pkg,a.uid,n,action);
 
-      const key=String(a.uid)+"|"+n;
+      const key=String(a.user)+"|"+String(a.pkg)+"|"+String(a.uid)+"|"+n;
 
       if(block){
         policy.set(key,true);
@@ -1270,9 +1274,16 @@ function exportBackup(){
     timestamp:new Date().toISOString(),
     policy:Array.from(policy.keys()).map(k=>{
       const p=k.split("|");
-      const uid=p[0];
-      const network=p[1];
-      const app=apps.find(a=>String(a.uid)===uid);
+      const user=p[0];
+      const pkg=p[1];
+      const uid=p[2];
+      const network=p[3];
+      const app=apps.find(a=>
+        String(a.user)===user &&
+        String(a.pkg)===pkg &&
+        String(a.uid)===uid
+      );
+
       return{
         uid:uid,
         network:network,
@@ -1283,10 +1294,17 @@ function exportBackup(){
           user:app.user,
           profile:app.profileName,
           system:app.system
-        }:null
+        }:{
+          name:"",
+          pkg:pkg,
+          user:user,
+          profile:"",
+          system:false
+        }
       };
     })
   };
+
   const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
   const url=URL.createObjectURL(blob);
   const a=document.createElement("a");
@@ -1299,7 +1317,6 @@ function exportBackup(){
   toast("Policy exported");
   setTaskStatus("READY");
 }
-
 async function importBackup(file){
   setTaskStatus("IMPORTING");
   if(!file)return;
@@ -1318,14 +1335,22 @@ async function importBackup(file){
     const next=new Map();
 
     d.policy.forEach(x=>{
+      const app=x&&x.app;
+      const user=app&&String(app.user);
+      const pkg=app&&String(app.pkg);
+      const uid=x&&String(x.uid);
+
       if(
         x &&
-        /^\d+$/.test(String(x.uid)) &&
+        app &&
+        /^\d+$/.test(user) &&
+        /^[A-Za-z0-9._-]+$/.test(pkg) &&
+        /^\d+$/.test(uid) &&
         ["MOBILE","WIFI","LAN"].includes(x.network) &&
         x.action==="BLOCK"
       ){
         next.set(
-          String(x.uid)+"|"+x.network,
+          user+"|"+pkg+"|"+uid+"|"+x.network,
           true
         );
       }
@@ -1358,7 +1383,7 @@ async function importBackup(file){
 
     for(const [key,action] of changes){
       const p=key.split("|");
-      await postPolicy(p[0],p[1],action);
+      await postPolicy(p[0],p[1],p[2],p[3],action);
       done++;
       updateBulkProgress(done,changes.length);
     }
