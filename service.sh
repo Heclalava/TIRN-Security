@@ -1677,11 +1677,14 @@ generation_restore_old() {
     OLD4="$2"
     OLD6="$3"
 
+    NEW4="TIRNFW-G${NEW_GEN}"
+    NEW6="TIRNFW-G${NEW_GEN}"
+
     log_warn "Firewall" "Generation rollback started" \
         "new=$NEW_GEN old4=${OLD4:-none} old6=${OLD6:-none}"
 
-    generation_remove_active_ipv4_checked "$NEW_GEN" || return 1
-    generation_remove_active_ipv6_checked "$NEW_GEN" || return 1
+    generation_remove_active_ipv4_checked "$NEW4" || return 1
+    generation_remove_active_ipv6_checked "$NEW6" || return 1
 
     if [ -n "$OLD4" ]; then
         if ! generation_active_rule_ipv4 "$OLD4"; then
@@ -1697,11 +1700,11 @@ generation_restore_old() {
         generation_active_rule_ipv6 "$OLD6" || return 1
     fi
 
-    if [ -z "$OLD4" ] && generation_active_rule_ipv4 "$NEW_GEN"; then
+    if [ -z "$OLD4" ] && generation_active_rule_ipv4 "$NEW4"; then
         return 1
     fi
 
-    if [ -z "$OLD6" ] && generation_active_rule_ipv6 "$NEW_GEN"; then
+    if [ -z "$OLD6" ] && generation_active_rule_ipv6 "$NEW6"; then
         return 1
     fi
 
@@ -1712,8 +1715,8 @@ generation_restore_old() {
         [ "$OLD4_ID" = "$OLD6_ID" ] || return 1
         generation_verify_stable_dispatcher_complete "$OLD4_ID" || return 1
     elif [ -z "$OLD4" ] && [ -z "$OLD6" ]; then
-        if generation_active_rule_ipv4 "$NEW_GEN" ||
-           generation_active_rule_ipv6 "$NEW_GEN"; then
+        if generation_active_rule_ipv4 "$NEW4" ||
+           generation_active_rule_ipv6 "$NEW6"; then
             return 1
         fi
     else
@@ -1814,10 +1817,10 @@ generation_switch_transaction() {
         return 1
     fi
 
-    if ! generation_install_active_ipv4 "$NEW_GEN"; then
+    if ! generation_install_active_ipv4 "$NEW4"; then
         log_error "Firewall" "IPv4 activation failed"             "generation=$NEW_GEN"
 
-        if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+        if generation_restore_old "$NEW4" "$OLD4" "$OLD6"; then
             if generation_guard_remove; then
                 generation_transaction_cleanup_new "$NEW_GEN"
                 return 1
@@ -1831,10 +1834,10 @@ generation_switch_transaction() {
         return 1
     fi
 
-    if ! generation_install_active_ipv6 "$NEW_GEN"; then
+    if ! generation_install_active_ipv6 "$NEW6"; then
         log_error "Firewall" "IPv6 activation failed"             "generation=$NEW_GEN"
 
-        if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+        if generation_restore_old "$NEW4" "$OLD4" "$OLD6"; then
             if generation_guard_remove; then
                 generation_transaction_cleanup_new "$NEW_GEN"
                 return 1
@@ -1848,11 +1851,11 @@ generation_switch_transaction() {
         return 1
     fi
 
-    if ! generation_active_rule_ipv4 "$NEW_GEN" ||
-       ! generation_active_rule_ipv6 "$NEW_GEN"; then
+    if ! generation_active_rule_ipv4 "$NEW4" ||
+       ! generation_active_rule_ipv6 "$NEW6"; then
         log_error "Firewall" "Generation activation verification failed"             "generation=$NEW_GEN"
 
-        if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+        if generation_restore_old "$NEW4" "$OLD4" "$OLD6"; then
             if generation_guard_remove; then
                 generation_transaction_cleanup_new "$NEW_GEN"
                 return 1
@@ -1870,7 +1873,7 @@ generation_switch_transaction() {
        ! generation_remove_legacy_dispatcher_rules ipv6; then
         log_error "Firewall" "Dispatcher cleanup failed"             "generation=$NEW_GEN"
 
-        if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+        if generation_restore_old "$NEW4" "$OLD4" "$OLD6"; then
             if generation_guard_remove; then
                 generation_transaction_cleanup_new "$NEW_GEN"
                 return 1
@@ -1889,7 +1892,7 @@ generation_switch_transaction() {
        ! generation_verify_old_removed "$OLD4" "$OLD6"; then
         log_error "Firewall" "Old generation removal failed"             "generation=$NEW_GEN old4=${OLD4:-none} old6=${OLD6:-none}"
 
-        if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+        if generation_restore_old "$NEW4" "$OLD4" "$OLD6"; then
             if generation_guard_remove; then
                 generation_transaction_cleanup_new "$NEW_GEN"
                 return 1
@@ -1906,7 +1909,7 @@ generation_switch_transaction() {
     if ! generation_verify_stable_dispatcher_complete "$NEW_GEN"; then
         log_error "Firewall" "Guarded stable dispatcher verification failed"             "generation=$NEW_GEN"
 
-        if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+        if generation_restore_old "$NEW4" "$OLD4" "$OLD6"; then
             if generation_guard_remove; then
                 generation_transaction_cleanup_new "$NEW_GEN"
                 return 1
@@ -1945,8 +1948,8 @@ generation_switch_transaction() {
     fi
 
     if ! generation_verify_stable_dispatcher_complete "$NEW_GEN" ||
-       ! generation_active_rule_ipv4 "$NEW_GEN" ||
-       ! generation_active_rule_ipv6 "$NEW_GEN"; then
+       ! generation_active_rule_ipv4 "$NEW4" ||
+       ! generation_active_rule_ipv6 "$NEW6"; then
 
         log_error "Firewall" "Post-guard verification failed"             "generation=$NEW_GEN"
 
@@ -1956,7 +1959,7 @@ generation_switch_transaction() {
             return 1
         fi
 
-        if ! generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+        if ! generation_restore_old "$NEW4" "$OLD4" "$OLD6"; then
             log_error "Firewall" "Rollback verification failed"                 "generation=$NEW_GEN"
             return 1
         fi
