@@ -1530,16 +1530,41 @@ generation_verify_stable_dispatcher_family() {
 $RULES
 EOF
 
-    [ "$GENERATION_COUNT" -eq 1 ] || return 1
-    [ "$GENERATION_TARGET" = "$EXPECTED" ] || return 1
-    [ "$RETURN_COUNT" -eq 1 ] || return 1
-    [ "$GUARD_COUNT" -le 1 ] || return 1
-    [ "$RETURN_POSITION" -eq "$POSITION" ] || return 1
+    if [ "$GENERATION_COUNT" -ne 1 ]; then
+        log_error "DEBUG" "stable dispatcher generation count failed" "count=$GENERATION_COUNT expected=$EXPECTED rules=$RULES"
+        return 1
+    fi
+
+    if [ "$GENERATION_TARGET" != "$EXPECTED" ]; then
+        log_error "DEBUG" "stable dispatcher target failed" "target=$GENERATION_TARGET expected=$EXPECTED rules=$RULES"
+        return 1
+    fi
+
+    if [ "$RETURN_COUNT" -ne 1 ]; then
+        log_error "DEBUG" "stable dispatcher return count failed" "count=$RETURN_COUNT rules=$RULES"
+        return 1
+    fi
+
+    if [ "$GUARD_COUNT" -gt 1 ]; then
+        log_error "DEBUG" "stable dispatcher guard count failed" "count=$GUARD_COUNT rules=$RULES"
+        return 1
+    fi
+
+    if [ "$RETURN_POSITION" -ne "$POSITION" ]; then
+        log_error "DEBUG" "stable dispatcher return position failed" "return=$RETURN_POSITION last=$POSITION rules=$RULES"
+        return 1
+    fi
 
     if [ "$GUARD_COUNT" -eq 1 ]; then
-        [ "$GENERATION_POSITION" -eq 2 ] || return 1
+        if [ "$GENERATION_POSITION" -ne 2 ]; then
+            log_error "DEBUG" "stable dispatcher generation position failed with guard" "position=$GENERATION_POSITION rules=$RULES"
+            return 1
+        fi
     else
-        [ "$GENERATION_POSITION" -eq 1 ] || return 1
+        if [ "$GENERATION_POSITION" -ne 1 ]; then
+            log_error "DEBUG" "stable dispatcher generation position failed without guard" "position=$GENERATION_POSITION rules=$RULES"
+            return 1
+        fi
     fi
 
     return 0
