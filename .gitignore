@@ -9,3 +9,12 @@
 *.before-*
 /backups/
 /TIRN-Security-install.zip
+
+/TIRN-Security-ui-polish-rc1-37-g170e54f-runtime-install.zip
+
+# Local development/recovery backups
+/webroot/cgi-bin/*.before-*
+/webroot/ui.before-*
+/*.pre-*
+/webroot/cgi-bin/*.pre-*
+/tirn-atomic-backup/

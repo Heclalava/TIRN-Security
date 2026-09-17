@@ -106,21 +106,6 @@ if [ "$REQUEST_METHOD" = "GET" ]; then
                         network
                     first=0
                 }
-                else if (n == 3) {
-                    uid=f[1]
-                    network=f[2]
-                    action=f[3]
-
-                    if (action != "BLOCK")
-                        next
-
-                    if (!first)
-                        printf ","
-                    printf "{\"user\":\"\",\"pkg\":\"\",\"uid\":\"%s\",\"name\":\"\",\"network\":\"%s\",\"action\":\"BLOCK\",\"legacy\":true}",
-                        uid,
-                        network
-                    first=0
-                }
             }
         ' /dev/stdin "$POLICY"
     fi
@@ -206,10 +191,6 @@ awk -F "|" \
     -v user="$user" \
     -v pkg="$pkg" \
     -v network="$network" '
-    NF == 3 {
-        print
-        next
-    }
     NF == 5 && !($1 == user && $2 == pkg && $4 == network && $5 == "BLOCK") {
         print
     }
