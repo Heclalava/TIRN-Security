@@ -620,12 +620,16 @@ bootstrap_output_hook_family() {
     while IFS= read -r RULE; do
         [ -n "$RULE" ] || continue
 
-        POSITION=$((POSITION + 1))
+        case "$RULE" in
+            "-A OUTPUT "*)
+                POSITION=$((POSITION + 1))
 
-        if [ "$RULE" = "-A OUTPUT -j $MAIN_CHAIN" ]; then
-            COUNT=$((COUNT + 1))
-            HOOK_POSITION="$POSITION"
-        fi
+                if [ "$RULE" = "-A OUTPUT -j $MAIN_CHAIN" ]; then
+                    COUNT=$((COUNT + 1))
+                    HOOK_POSITION="$POSITION"
+                fi
+                ;;
+        esac
     done <<EOF
 $RULES
 EOF
@@ -650,14 +654,20 @@ EOF
     RULES="$("$IPT" -w 5 -S OUTPUT 2>/dev/null)" || return 1
     COUNT=0
     POSITION=0
+    HOOK_POSITION=0
 
     while IFS= read -r RULE; do
         [ -n "$RULE" ] || continue
-        POSITION=$((POSITION + 1))
-        if [ "$RULE" = "-A OUTPUT -j $MAIN_CHAIN" ]; then
-            COUNT=$((COUNT + 1))
-            HOOK_POSITION="$POSITION"
-        fi
+
+        case "$RULE" in
+            "-A OUTPUT "*)
+                POSITION=$((POSITION + 1))
+                if [ "$RULE" = "-A OUTPUT -j $MAIN_CHAIN" ]; then
+                    COUNT=$((COUNT + 1))
+                    HOOK_POSITION="$POSITION"
+                fi
+                ;;
+        esac
     done <<EOF
 $RULES
 EOF
@@ -698,12 +708,16 @@ bootstrap_verify_existing_family() {
 
     while IFS= read -r RULE; do
         [ -n "$RULE" ] || continue
-        POSITION=$((POSITION + 1))
+        case "$RULE" in
+            "-A OUTPUT "*)
+                POSITION=$((POSITION + 1))
 
-        if [ "$RULE" = "-A OUTPUT -j $MAIN_CHAIN" ]; then
-            COUNT=$((COUNT + 1))
-            HOOK_POSITION="$POSITION"
-        fi
+                if [ "$RULE" = "-A OUTPUT -j $MAIN_CHAIN" ]; then
+                    COUNT=$((COUNT + 1))
+                    HOOK_POSITION="$POSITION"
+                fi
+                ;;
+        esac
     done <<EOF
 $RULES
 EOF
