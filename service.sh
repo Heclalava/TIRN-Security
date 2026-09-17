@@ -540,12 +540,32 @@ generation_active_rule_ipv6() {
 
 generation_install_active_ipv4() {
     GEN="$1"
-    "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$GEN"
+
+    if ! "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$GEN"; then
+        log_error "DEBUG" "IPv4 activation command failed"             "main=$MAIN_CHAIN target=$GEN"
+        "$IPTABLES" -w 5 -S "$MAIN_CHAIN" 2>&1 | while IFS= read -r LINE; do
+            log_error "DEBUG" "IPv4 main chain state" "rule=$LINE"
+        done
+        "$IPTABLES" -w 5 -L "$GEN" >/dev/null 2>&1 ||             log_error "DEBUG" "IPv4 target chain missing" "target=$GEN"
+        return 1
+    fi
+
+    return 0
 }
 
 generation_install_active_ipv6() {
     GEN="$1"
-    "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$GEN"
+
+    if ! "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$GEN"; then
+        log_error "DEBUG" "IPv6 activation command failed"             "main=$MAIN_CHAIN target=$GEN"
+        "$IP6TABLES" -w 5 -S "$MAIN_CHAIN" 2>&1 | while IFS= read -r LINE; do
+            log_error "DEBUG" "IPv6 main chain state" "rule=$LINE"
+        done
+        "$IP6TABLES" -w 5 -L "$GEN" >/dev/null 2>&1 ||             log_error "DEBUG" "IPv6 target chain missing" "target=$GEN"
+        return 1
+    fi
+
+    return 0
 }
 
 generation_remove_active_ipv4() {
