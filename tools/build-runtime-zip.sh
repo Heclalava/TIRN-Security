@@ -10,17 +10,17 @@ echo "=== BUILD RUNTIME HELPERS ==="
 
 (
     cd tools/apklabel
-    GO111MODULE=on GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o apklabel-arm64 .
+    GO111MODULE=on GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o apklabel-arm64 .
 )
 
 (
     cd tools/appaudit
-    GO111MODULE=on GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o appaudit-arm64 .
+    GO111MODULE=on GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o appaudit-arm64 .
 )
 
 (
     cd tools/apphelper
-    GO111MODULE=off GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o apphelper-arm64 .
+    GO111MODULE=off GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o apphelper-arm64 .
 )
 
 echo "=== VERIFY TRACKED RUNTIME HELPERS ==="
