@@ -247,11 +247,6 @@ generation_verify_family() {
     WIFI_RULES="$("$IPT" -w 5 -S "$WIFI" 2>/dev/null)" || return 1
     LAN_RULES="$("$IPT" -w 5 -S "$LAN" 2>/dev/null)" || return 1
 
-    log_error "DEBUG" "verify family chains" "family=$FAMILY mob=$MOB wifi=$WIFI lan=$LAN"
-    log_error "DEBUG" "mob rules" "rules=$(printf '%s' "$MOB_RULES" | tr '\\n' ';')"
-    log_error "DEBUG" "wifi rules" "rules=$(printf '%s' "$WIFI_RULES" | tr '\\n' ';')"
-    log_error "DEBUG" "lan rules" "rules=$(printf '%s' "$LAN_RULES" | tr '\\n' ';')"
-    log_error "DEBUG" "disp rules" "rules=$(printf '%s' "$DISP_RULES" | tr '\\n' ';')"
 
     # Every network policy chain must contain only TIRN-generated
     # owner DROP rules followed by exactly one final RETURN.
