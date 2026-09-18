@@ -1102,6 +1102,8 @@ bootstrap_post_refresh()
 
 
 bootstrap_existing_install() {
+    CACHE_RECOVERY=0
+
     if ! acquire_firewall_lock; then
         log_error "Firewall" "Existing install bootstrap failed"             "firewall lock unavailable"
         return 1
@@ -1141,6 +1143,8 @@ bootstrap_existing_install() {
             return 1
         fi
 
+        CACHE_RECOVERY=1
+
         if ! acquire_firewall_lock; then
             log_error "Firewall" "Existing install bootstrap failed"                 "firewall lock unavailable after cache recovery"
             return 1
@@ -1149,25 +1153,25 @@ bootstrap_existing_install() {
         log_info "Apps" "Cached app database valid"             "using previous boot snapshot"
     fi
 
-    if ! bootstrap_main_chain_fail_closed_family ipv4; then
+    if [ "$CACHE_RECOVERY" -eq 0 ] && ! bootstrap_main_chain_fail_closed_family ipv4; then
         release_firewall_lock
         log_error "Firewall" "Existing install bootstrap failed"             "IPv4 TIRNFW state invalid"
         return 1
     fi
 
-    if ! bootstrap_main_chain_fail_closed_family ipv6; then
+    if [ "$CACHE_RECOVERY" -eq 0 ] && ! bootstrap_main_chain_fail_closed_family ipv6; then
         release_firewall_lock
         log_error "Firewall" "Existing install bootstrap failed"             "IPv6 TIRNFW state invalid"
         return 1
     fi
 
-    if ! bootstrap_output_hook_family ipv4; then
+    if [ "$CACHE_RECOVERY" -eq 0 ] && ! bootstrap_output_hook_family ipv4; then
         release_firewall_lock
         log_error "Firewall" "Existing install bootstrap failed"             "IPv4 OUTPUT hook unavailable"
         return 1
     fi
 
-    if ! bootstrap_output_hook_family ipv6; then
+    if [ "$CACHE_RECOVERY" -eq 0 ] && ! bootstrap_output_hook_family ipv6; then
         release_firewall_lock
         log_error "Firewall" "Existing install bootstrap failed"             "IPv6 OUTPUT hook unavailable"
         return 1
