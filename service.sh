@@ -989,31 +989,87 @@ validate_apps_cache() {
 }
 
 
-bootstrap_post_refresh()
+verify_apps_refresh()
 {
-    log_info "Apps" "Cache refresh started" "post-bootstrap"
+    PROGRESS="$DATA_DIR/apps-refresh-progress"
 
-    if ! /system/bin/sh "$MODDIR/refresh_apps" >/dev/null 2>&1; then
-        log_error "Apps" "Cache refresh failed" "post-bootstrap"
-        return 1
-    fi
+    [ -s "$PROGRESS" ] || return 1
 
-    TIMEOUT=180
-    ELAPSED=0
+    STATUS="$(grep -o '"status":"[^"]*"' "$PROGRESS" | cut -d'"' -f4)"
+    PROCESSED="$(grep -o '"processed":[0-9]*' "$PROGRESS" | cut -d: -f2)"
+    TOTAL="$(grep -o '"total":[0-9]*' "$PROGRESS" | cut -d: -f2)"
 
-    while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-        if validate_apps_cache; then
-            log_info "Apps" "Cache ready" "post-bootstrap"
-            return 0
+    [ "$STATUS" = "COMPLETE" ] || return 1
+
+    case "$PROCESSED" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    case "$TOTAL" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    [ "$TOTAL" -gt 0 ] || return 1
+    [ "$PROCESSED" -eq "$TOTAL" ] || return 1
+
+    CACHE_TIME="$(stat -c %Y "$DATA_DIR/apps.json" 2>/dev/null)"
+    case "$CACHE_TIME" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    [ "$CACHE_TIME" -ge "$REFRESH_STARTED" ] || return 1
+
+    validate_apps_cache
+}
+
+
+refresh_apps_verified()
+{
+    MODE="$1"
+
+    ATTEMPT=1
+    MAX_ATTEMPTS=2
+
+    while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
+
+        rm -f "$DATA_DIR/apps-refresh-progress"
+
+        REFRESH_STARTED="$(date +%s)"
+
+        log_info "Apps" "Cache refresh started" \
+            "mode=$MODE attempt=$ATTEMPT"
+
+        if /system/bin/sh "$MODDIR/refresh_apps" >/dev/null 2>&1; then
+
+            if verify_apps_refresh; then
+                log_info "Apps" "Cache ready" \
+                    "mode=$MODE attempt=$ATTEMPT"
+                return 0
+            fi
+
+            log_warn "Apps" "Cache verification failed" \
+                "mode=$MODE attempt=$ATTEMPT"
+
+        else
+
+            log_warn "Apps" "Refresh command failed" \
+                "mode=$MODE attempt=$ATTEMPT"
+
         fi
 
-        sleep 2
-        ELAPSED=$((ELAPSED + 2))
+        ATTEMPT=$((ATTEMPT + 1))
     done
 
-    log_error "Apps" "Cache refresh timeout"         "post-bootstrap apps.json unavailable after ${TIMEOUT}s"
+    log_error "Apps" "Cache refresh failed" \
+        "mode=$MODE attempts=$MAX_ATTEMPTS"
 
     return 1
+}
+
+
+bootstrap_post_refresh()
+{
+    refresh_apps_verified "post-bootstrap"
 }
 
 
@@ -1161,30 +1217,7 @@ bootstrap_existing_install() {
 
 refresh_apps_bootstrap()
 {
-    log_info "Apps" "Cache refresh started" "bootstrap"
-
-    if ! /system/bin/sh "$MODDIR/refresh_apps" >/dev/null 2>&1; then
-        log_error "Apps" "Cache refresh failed" "bootstrap"
-        return 1
-    fi
-
-    TIMEOUT=180
-    ELAPSED=0
-
-    while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-        if validate_apps_cache; then
-            log_info "Apps" "Cache ready" "bootstrap"
-            return 0
-        fi
-
-        sleep 2
-        ELAPSED=$((ELAPSED + 2))
-    done
-
-    log_error "Apps" "Cache refresh timeout" \
-        "apps.json not available after ${TIMEOUT}s"
-
-    return 1
+    refresh_apps_verified "bootstrap"
 }
 
 bootstrap_initialize() {
@@ -2350,7 +2383,7 @@ if [ "${1:-}" = "--refresh" ]; then
 
     FAILED=0
 
-    if /system/bin/sh "$MODDIR/refresh_apps" >/dev/null 2>&1; then
+    if refresh_apps_verified "manual"; then
         log_info "Apps" "Cache refreshed" "manual refresh"
     else
         log_error "Apps" "Cache refresh failed" "manual refresh"
