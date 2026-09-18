@@ -952,16 +952,117 @@ prepare_policy() {
     log_info "Policy" "Prepared" "rules=$PREPARED_RULE_COUNT"
     return 0
 }
+validate_apps_cache() {
+    CACHE="$DATA_DIR/apps.json"
+
+    [ -s "$CACHE" ] || return 1
+
+    if ! grep -q '"status":"OK"' "$CACHE"; then
+        return 1
+    fi
+
+    if ! grep -q '"profiles":\[' "$CACHE"; then
+        return 1
+    fi
+
+    if ! grep -q '"apps":\[' "$CACHE"; then
+        return 1
+    fi
+
+    if grep -q '"apps":\[\]' "$CACHE"; then
+        return 1
+    fi
+
+    if ! grep -q '"user":"[0-9]*"' "$CACHE"; then
+        return 1
+    fi
+
+    if ! grep -q '"pkg":"[^"]*"' "$CACHE"; then
+        return 1
+    fi
+
+    if ! grep -q '"uid":"[0-9]*"' "$CACHE"; then
+        return 1
+    fi
+
+    return 0
+}
+
+
+bootstrap_post_refresh()
+{
+    log_info "Apps" "Cache refresh started" "post-bootstrap"
+
+    if ! /system/bin/sh "$MODDIR/refresh_apps" >/dev/null 2>&1; then
+        log_error "Apps" "Cache refresh failed" "post-bootstrap"
+        return 1
+    fi
+
+    TIMEOUT=180
+    ELAPSED=0
+
+    while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+        if validate_apps_cache; then
+            log_info "Apps" "Cache ready" "post-bootstrap"
+            return 0
+        fi
+
+        sleep 2
+        ELAPSED=$((ELAPSED + 2))
+    done
+
+    log_error "Apps" "Cache refresh timeout"         "post-bootstrap apps.json unavailable after ${TIMEOUT}s"
+
+    return 1
+}
+
+
 bootstrap_existing_install() {
     if ! acquire_firewall_lock; then
         log_error "Firewall" "Existing install bootstrap failed"             "firewall lock unavailable"
         return 1
     fi
 
-    if ! refresh_apps_bootstrap; then
+    if ! validate_apps_cache; then
+        log_warn "Apps" "Cached app database unavailable"             "entering fail-closed recovery"
+
+        if ! bootstrap_main_chain_fail_closed_family ipv4; then
+            release_firewall_lock
+            log_error "Firewall" "Existing install bootstrap failed"                 "IPv4 fail-closed recovery unavailable"
+            return 1
+        fi
+
+        if ! bootstrap_main_chain_fail_closed_family ipv6; then
+            release_firewall_lock
+            log_error "Firewall" "Existing install bootstrap failed"                 "IPv6 fail-closed recovery unavailable"
+            return 1
+        fi
+
+        if ! bootstrap_output_hook_family ipv4; then
+            release_firewall_lock
+            log_error "Firewall" "Existing install bootstrap failed"                 "IPv4 fail-closed OUTPUT hook unavailable"
+            return 1
+        fi
+
+        if ! bootstrap_output_hook_family ipv6; then
+            release_firewall_lock
+            log_error "Firewall" "Existing install bootstrap failed"                 "IPv6 fail-closed OUTPUT hook unavailable"
+            return 1
+        fi
+
         release_firewall_lock
-        log_error "Firewall" "Existing install bootstrap failed"             "app cache unavailable"
-        return 1
+
+        if ! bootstrap_post_refresh; then
+            log_error "Firewall" "Existing install bootstrap failed"                 "unable to recover app cache"
+            return 1
+        fi
+
+        if ! acquire_firewall_lock; then
+            log_error "Firewall" "Existing install bootstrap failed"                 "firewall lock unavailable after cache recovery"
+            return 1
+        fi
+    else
+        log_info "Apps" "Cached app database valid"             "using previous boot snapshot"
     fi
 
     if ! bootstrap_main_chain_fail_closed_family ipv4; then
@@ -1045,6 +1146,16 @@ bootstrap_existing_install() {
 
     log_info "Firewall" "Existing install bootstrap completed"         "verified generation activated"
 
+    if bootstrap_post_refresh; then
+        if apply_policy; then
+            log_info "Firewall" "Post-bootstrap refresh applied"                 "new application state activated"
+        else
+            log_error "Firewall" "Post-bootstrap refresh failed"                 "existing verified generation retained"
+        fi
+    else
+        log_error "Apps" "Post-bootstrap refresh failed"             "existing verified generation retained"
+    fi
+
     return 0
 }
 
@@ -1061,7 +1172,7 @@ refresh_apps_bootstrap()
     ELAPSED=0
 
     while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-        if [ -s "$DATA_DIR/apps.json" ]; then
+        if validate_apps_cache; then
             log_info "Apps" "Cache ready" "bootstrap"
             return 0
         fi
