@@ -1234,13 +1234,13 @@ bootstrap_existing_install() {
 
     log_info "Firewall" "Existing install bootstrap completed"         "verified generation activated"
 
-    if bootstrap_post_refresh; then
+    if [ "$CACHE_RECOVERY" -eq 0 ] && bootstrap_post_refresh; then
         if apply_policy; then
             log_info "Firewall" "Post-bootstrap refresh applied"                 "new application state activated"
         else
             log_error "Firewall" "Post-bootstrap refresh failed"                 "existing verified generation retained"
         fi
-    else
+    elif [ "$CACHE_RECOVERY" -eq 0 ]; then
         log_error "Apps" "Post-bootstrap refresh failed"             "existing verified generation retained"
     fi
 
