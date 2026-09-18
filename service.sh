@@ -40,21 +40,41 @@ AUDIT_LOG="$LOG_FILE"
 
 # Atomic firewall transaction lock. This is separate from policy.lock.
 FIREWALL_LOCK="$DATA_DIR/firewall.lock"
+FIREWALL_LOCK_OWNER="$FIREWALL_LOCK/owner"
 
 acquire_firewall_lock() {
     LOCK_WAIT=0
+
     while ! mkdir "$FIREWALL_LOCK" 2>/dev/null; do
+
+        if [ ! -r "$FIREWALL_LOCK_OWNER" ]; then
+            rmdir "$FIREWALL_LOCK" 2>/dev/null || true
+            continue
+        fi
+
+        read -r LOCK_PID < "$FIREWALL_LOCK_OWNER"
+
+        if ! kill -0 "$LOCK_PID" 2>/dev/null; then
+            rmdir "$FIREWALL_LOCK" 2>/dev/null || true
+            continue
+        fi
+
         sleep 0.05
         LOCK_WAIT=$((LOCK_WAIT + 1))
+
         if [ "$LOCK_WAIT" -ge 200 ]; then
             log_error "Firewall" "Lock timeout" "another firewall transaction is active"
             return 1
         fi
     done
+
+    printf '%s\n' "$$" > "$FIREWALL_LOCK_OWNER"
+
     return 0
 }
 
 release_firewall_lock() {
+    rm -f "$FIREWALL_LOCK_OWNER" 2>/dev/null || true
     rmdir "$FIREWALL_LOCK" 2>/dev/null || true
 }
 
