@@ -1030,6 +1030,10 @@ refresh_apps_verified()
     ATTEMPT=1
     MAX_ATTEMPTS=2
 
+    if [ "$MODE" = "bootstrap" ] || [ "$MODE" = "post-bootstrap" ]; then
+        sleep 10
+    fi
+
     while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
 
         rm -f "$DATA_DIR/apps-refresh-progress"
@@ -1055,6 +1059,10 @@ refresh_apps_verified()
             log_warn "Apps" "Refresh command failed" \
                 "mode=$MODE attempt=$ATTEMPT"
 
+        fi
+
+        if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then
+            sleep 10
         fi
 
         ATTEMPT=$((ATTEMPT + 1))
