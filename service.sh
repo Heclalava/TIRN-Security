@@ -964,6 +964,30 @@ bootstrap_existing_install() {
         return 1
     fi
 
+    if ! bootstrap_main_chain_fail_closed_family ipv4; then
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed"             "IPv4 TIRNFW state invalid"
+        return 1
+    fi
+
+    if ! bootstrap_main_chain_fail_closed_family ipv6; then
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed"             "IPv6 TIRNFW state invalid"
+        return 1
+    fi
+
+    if ! bootstrap_output_hook_family ipv4; then
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed"             "IPv4 OUTPUT hook unavailable"
+        return 1
+    fi
+
+    if ! bootstrap_output_hook_family ipv6; then
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed"             "IPv6 OUTPUT hook unavailable"
+        return 1
+    fi
+
     TMP_STATE="$DATA_DIR/network.state.bootstrap.$$"
     PREPARED_POLICY="$DATA_DIR/policy.prepared.bootstrap.$$"
     PREPARED_COUNT="$DATA_DIR/policy.count.bootstrap.$$"
