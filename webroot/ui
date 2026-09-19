@@ -54,6 +54,7 @@ button{color:inherit}
   z-index:60;
 }
 .main-menu.show{display:block}
+.main-menu .menu-separator{height:1px;margin:4px 8px;background:var(--border);opacity:.7}
 .main-menu button{
   display:block;
   width:100%;
@@ -560,10 +561,14 @@ button{color:inherit}
 
   <div id="mainMenu" class="main-menu">
     <button onclick="hideMainMenu();refreshAppCache()">Refresh app cache</button>
+    <div class="menu-separator"></div>
     <button onclick="hideMainMenu();downloadLogs()">Download logs</button>
-    <button class="danger" onclick="hideMainMenu();showClearLogsConfirm()">Clear logs</button>
+    <button class="danger" onclick="hideMainMenu();showClearLogsConfirm('system')">Clear system log</button>
+    <button class="danger" onclick="hideMainMenu();showClearLogsConfirm('debug')">Clear debug log</button>
+    <div class="menu-separator"></div>
     <button onclick="exportBackup();hideMainMenu()">Export policy</button>
     <button onclick="document.getElementById('importFile').click();hideMainMenu()">Import policy</button>
+    <div class="menu-separator"></div>
     <button class="danger" onclick="hideMainMenu();clearAll()">Clear all blocks</button>
   </div>
 </header>
@@ -691,6 +696,7 @@ button{color:inherit}
 <script>
 const API="/cgi-bin";
 
+let clearLogTarget="system";
 let apps=[];
 let profiles=[];
 let policy=new Map();
@@ -1595,7 +1601,8 @@ function hideClearConfirm(){
   document.getElementById("clearConfirmBack").style.display="none";
 }
 
-function showClearLogsConfirm(){
+function showClearLogsConfirm(target){
+  clearLogTarget=target==="debug"?"debug":"system";
   const back=document.getElementById("clearLogsBack");
   const title=document.getElementById("clearLogsTitle");
   const message=document.getElementById("clearLogsMessage");
@@ -1603,10 +1610,12 @@ function showClearLogsConfirm(){
   const confirm=document.getElementById("clearLogsConfirm");
   const cancel=document.getElementById("clearLogsCancel");
   const close=document.getElementById("clearLogsClose");
+  const label=clearLogTarget==="debug"?"debug.log":"service.log";
 
-  title.textContent="Clear TIRN Security logs?";
-  message.textContent="This will clear the service and debug logs. Installation logs and policy data will not be changed.";
+  title.textContent="Clear "+label+"?";
+  message.textContent="This will clear only "+label+". The other log, installation logs, and policy data will not be changed.";
   error.textContent="";
+  confirm.textContent="Clear "+(clearLogTarget==="debug"?"debug log":"system log");
   confirm.style.display="";
   confirm.disabled=false;
   cancel.style.display="";
@@ -1633,25 +1642,26 @@ async function confirmClearLogs(){
   const confirm=document.getElementById("clearLogsConfirm");
   const cancel=document.getElementById("clearLogsCancel");
   const close=document.getElementById("clearLogsClose");
+  const label=clearLogTarget==="debug"?"debug.log":"service.log";
 
   confirm.disabled=true;
   cancel.disabled=true;
   confirm.style.display="none";
   cancel.style.display="none";
   close.style.display="none";
-  title.textContent="Clearing TIRN Security logs…";
-  message.textContent="Clearing service.log and debug.log…";
+  title.textContent="Clearing "+label+"…";
+  message.textContent="Clearing "+label+"…";
   error.textContent="";
-  setTaskStatus("CLEARING LOGS");
+  setTaskStatus("CLEARING LOG");
 
   try{
-    await api("/logs-clear");
-    title.textContent="Logs cleared";
-    message.textContent="TIRN Security service.log and debug.log were cleared successfully.";
+    await api(clearLogTarget==="debug"?"/logs-clear-debug":"/logs-clear-system");
+    title.textContent=label+" cleared";
+    message.textContent="TIRN Security "+label+" was cleared successfully.";
     error.textContent="";
   }catch(e){
-    title.textContent="Failed to clear logs";
-    message.textContent="TIRN Security could not clear the requested logs.";
+    title.textContent="Failed to clear "+label;
+    message.textContent="TIRN Security could not clear "+label+".";
     error.textContent=e.message||"Unknown error";
   }finally{
     setTaskStatus("READY");
