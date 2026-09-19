@@ -40,9 +40,7 @@ queue_event() {
     [ -n "$ACTION" ] || return 0
     [ -n "$PACKAGE" ] || return 0
 
-    if "$SH" "$MODDIR/app-queue.sh" add "$ACTION" "$PACKAGE" >/dev/null 2>&1; then
-        debug_log "App Watcher" "Event queued" "$ACTION $PACKAGE"
-    else
+    if ! "$SH" "$MODDIR/app-queue.sh" add "$ACTION" "$PACKAGE" >/dev/null 2>&1; then
         log_error "App Watcher" "Queue failed" "$ACTION $PACKAGE"
     fi
 }
@@ -65,14 +63,8 @@ process_queue() {
             continue
         fi
 
-        debug_log "App Watcher" "Processing event" "$ACTION $PACKAGE"
-
         RESULT="$("$MODDIR/apphelper" "$ACTION" "$PACKAGE" 2>&1)"
         STATUS=$?
-
-        if [ -n "$RESULT" ]; then
-            debug_log "App Helper" "Command output" "$RESULT"
-        fi
 
         if [ "$STATUS" -eq 0 ]; then
             if [ "$ACTION" = "REMOVED" ]; then
@@ -90,7 +82,6 @@ process_queue() {
             "$SH" "$MODDIR/app-queue.sh" remove >/dev/null 2>&1
             log_info "Package" "Database updated" "$ACTION $PACKAGE"
         elif printf '%s\n' "$RESULT" | grep -q "APPS_BUSY"; then
-            debug_log "App Watcher" "Cache busy" "$ACTION $PACKAGE"
             sleep 10
         else
             log_error "Package" "Database update failed" "$ACTION $PACKAGE"

@@ -386,7 +386,7 @@ generation_guard_install() {
         return 1
     fi
 
-    log_info "Firewall" "Fail-closed guard installed" \
+    debug_log "Firewall" "Fail-closed guard installed" \
         "ipv4=active ipv6=active"
 
     return 0
@@ -478,7 +478,7 @@ generation_guard_remove() {
         return 1
     fi
 
-    log_info "Firewall" "Fail-closed guard removed"         "ipv4=absent ipv6=absent"
+    debug_log "Firewall" "Fail-closed guard removed"         "ipv4=absent ipv6=absent"
 
     return 0
 }
@@ -559,11 +559,11 @@ generation_install_active_ipv4() {
     GEN="$1"
 
     if ! "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$GEN"; then
-        log_error "DEBUG" "IPv4 activation command failed"             "main=$MAIN_CHAIN target=$GEN"
+        debug_log "Firewall" "IPv4 activation command failed"             "main=$MAIN_CHAIN target=$GEN"
         "$IPTABLES" -w 5 -S "$MAIN_CHAIN" 2>&1 | while IFS= read -r LINE; do
-            log_error "DEBUG" "IPv4 main chain state" "rule=$LINE"
+            debug_log "Firewall" "IPv4 main chain state" "rule=$LINE"
         done
-        "$IPTABLES" -w 5 -L "$GEN" >/dev/null 2>&1 ||             log_error "DEBUG" "IPv4 target chain missing" "target=$GEN"
+        "$IPTABLES" -w 5 -L "$GEN" >/dev/null 2>&1 ||             debug_log "Firewall" "IPv4 target chain missing" "target=$GEN"
         return 1
     fi
 
@@ -574,11 +574,11 @@ generation_install_active_ipv6() {
     GEN="$1"
 
     if ! "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$GEN"; then
-        log_error "DEBUG" "IPv6 activation command failed"             "main=$MAIN_CHAIN target=$GEN"
+        debug_log "Firewall" "IPv6 activation command failed"             "main=$MAIN_CHAIN target=$GEN"
         "$IP6TABLES" -w 5 -S "$MAIN_CHAIN" 2>&1 | while IFS= read -r LINE; do
-            log_error "DEBUG" "IPv6 main chain state" "rule=$LINE"
+            debug_log "Firewall" "IPv6 main chain state" "rule=$LINE"
         done
-        "$IP6TABLES" -w 5 -L "$GEN" >/dev/null 2>&1 ||             log_error "DEBUG" "IPv6 target chain missing" "target=$GEN"
+        "$IP6TABLES" -w 5 -L "$GEN" >/dev/null 2>&1 ||             debug_log "Firewall" "IPv6 target chain missing" "target=$GEN"
         return 1
     fi
 
@@ -1664,12 +1664,12 @@ generation_verify_complete() {
     GEN="$1"
 
     if ! generation_verify_family "$GEN" ipv4; then
-        log_error "DEBUG" "verify ipv4 failed" "generation=$GEN"
+        debug_log "Firewall" "verify ipv4 failed" "generation=$GEN"
         return 1
     fi
 
     if ! generation_verify_family "$GEN" ipv6; then
-        log_error "DEBUG" "verify ipv6 failed" "generation=$GEN"
+        debug_log "Firewall" "verify ipv6 failed" "generation=$GEN"
         return 1
     fi
 
@@ -1716,7 +1716,7 @@ generation_verify_dispatcher_family() {
             "")
                 ;;
             *)
-                log_error "DEBUG" "dispatcher unexpected rule" "family=$FAMILY rule=$RULE"
+                debug_log "Firewall" "dispatcher unexpected rule" "family=$FAMILY rule=$RULE"
                 return 1
                 ;;
         esac
@@ -1795,38 +1795,38 @@ $RULES
 EOF
 
     if [ "$GENERATION_COUNT" -ne 1 ]; then
-        log_error "DEBUG" "stable dispatcher generation count failed" "count=$GENERATION_COUNT expected=$EXPECTED rules=$RULES"
+        debug_log "Firewall" "stable dispatcher generation count failed" "count=$GENERATION_COUNT expected=$EXPECTED rules=$RULES"
         return 1
     fi
 
     if [ "$GENERATION_TARGET" != "$EXPECTED" ]; then
-        log_error "DEBUG" "stable dispatcher target failed" "target=$GENERATION_TARGET expected=$EXPECTED rules=$RULES"
+        debug_log "Firewall" "stable dispatcher target failed" "target=$GENERATION_TARGET expected=$EXPECTED rules=$RULES"
         return 1
     fi
 
     if [ "$RETURN_COUNT" -ne 1 ]; then
-        log_error "DEBUG" "stable dispatcher return count failed" "count=$RETURN_COUNT rules=$RULES"
+        debug_log "Firewall" "stable dispatcher return count failed" "count=$RETURN_COUNT rules=$RULES"
         return 1
     fi
 
     if [ "$GUARD_COUNT" -gt 1 ]; then
-        log_error "DEBUG" "stable dispatcher guard count failed" "count=$GUARD_COUNT rules=$RULES"
+        debug_log "Firewall" "stable dispatcher guard count failed" "count=$GUARD_COUNT rules=$RULES"
         return 1
     fi
 
     if [ "$RETURN_POSITION" -ne "$POSITION" ]; then
-        log_error "DEBUG" "stable dispatcher return position failed" "return=$RETURN_POSITION last=$POSITION rules=$RULES"
+        debug_log "Firewall" "stable dispatcher return position failed" "return=$RETURN_POSITION last=$POSITION rules=$RULES"
         return 1
     fi
 
     if [ "$GUARD_COUNT" -eq 1 ]; then
         if [ "$GENERATION_POSITION" -ne 1 ]; then
-            log_error "DEBUG" "stable dispatcher generation position failed with guard" "position=$GENERATION_POSITION rules=$RULES"
+            debug_log "Firewall" "stable dispatcher generation position failed with guard" "position=$GENERATION_POSITION rules=$RULES"
             return 1
         fi
     else
         if [ "$GENERATION_POSITION" -ne 1 ]; then
-            log_error "DEBUG" "stable dispatcher generation position failed without guard" "position=$GENERATION_POSITION rules=$RULES"
+            debug_log "Firewall" "stable dispatcher generation position failed without guard" "position=$GENERATION_POSITION rules=$RULES"
             return 1
         fi
     fi
@@ -2056,17 +2056,17 @@ generation_switch_transaction() {
         generation_transaction_cleanup_new "$NEW_GEN"
 
         if ! generation_create_family "$NEW_GEN" ipv4; then
-            log_error "DEBUG" "create ipv4 failed" "generation=$NEW_GEN"
+            debug_log "Firewall" "create ipv4 failed" "generation=$NEW_GEN"
         elif ! generation_create_family "$NEW_GEN" ipv6; then
-            log_error "DEBUG" "create ipv6 failed" "generation=$NEW_GEN"
+            debug_log "Firewall" "create ipv6 failed" "generation=$NEW_GEN"
         elif ! generation_populate_family "$NEW_GEN" ipv4 "$PREPARED_POLICY" "$NEW_STATE"; then
-            log_error "DEBUG" "populate ipv4 failed" "generation=$NEW_GEN"
+            debug_log "Firewall" "populate ipv4 failed" "generation=$NEW_GEN"
         elif ! generation_populate_family "$NEW_GEN" ipv6 "$PREPARED_POLICY" "$NEW_STATE"; then
-            log_error "DEBUG" "populate ipv6 failed" "generation=$NEW_GEN"
+            debug_log "Firewall" "populate ipv6 failed" "generation=$NEW_GEN"
         elif ! generation_verify_complete "$NEW_GEN"; then
-            log_error "DEBUG" "verify complete failed" "generation=$NEW_GEN"
+            debug_log "Firewall" "verify complete failed" "generation=$NEW_GEN"
         elif ! generation_verify_dispatcher_complete "$NEW_GEN"; then
-            log_error "DEBUG" "verify dispatcher failed" "generation=$NEW_GEN"
+            debug_log "Firewall" "verify dispatcher failed" "generation=$NEW_GEN"
         else
             BUILD_OK=1
             break
