@@ -32,8 +32,10 @@ umask 077
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
-touch "$POLICY_FILE"
-chmod 600 "$POLICY_FILE"
+if [ "${1:-}" != "--policy-event" ] && [ "${1:-}" != "--refresh" ]; then
+    touch "$POLICY_FILE"
+    chmod 600 "$POLICY_FILE"
+fi
 
 . "$MODDIR/logging-common.sh"
 AUDIT_LOG="$LOG_FILE"

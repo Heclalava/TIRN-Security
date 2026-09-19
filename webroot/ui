@@ -483,6 +483,19 @@ button{color:inherit}
   display:flex;
 }
 
+.stale-import-rule{
+  margin:12px 0;
+  padding:10px 12px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  box-shadow:0 2px 5px rgba(0,0,0,.22);
+}
+.stale-import-rule-title{
+  font-weight:600;
+}
+.stale-import-rule-detail{
+  margin-top:4px;
+}
 .modal{
   width:100%;
   max-width:420px;
@@ -642,6 +655,16 @@ button{color:inherit}
     </div>
     <p id="bulkProgressError" class="bulk-progress-error"></p>
     <button id="bulkProgressClose" onclick="hideBulkProgress()" disabled>Close</button>
+  </div>
+</div>
+
+<div id="staleImportBack" class="modal-back" onclick="if(event.target===this)hideStaleImportModal()">
+  <div class="modal">
+    <h2>Import completed with stale rules skipped</h2>
+    <p id="staleImportSummary"></p>
+    <p id="staleImportMessage">These rules were not imported because the application is no longer installed or its UID has changed.</p>
+    <div id="staleImportRules"></div>
+    <button onclick="hideStaleImportModal()">Close</button>
   </div>
 </div>
 
@@ -1332,67 +1355,57 @@ async function importBackup(file){
       throw new Error("Invalid backup");
     }
 
-    const next=new Map();
-
-    d.policy.forEach(x=>{
-      const app=x&&x.app;
-      const user=app&&String(app.user);
-      const pkg=app&&String(app.pkg);
-      const uid=x&&String(x.uid);
-
-      if(
-        x &&
-        app &&
-        /^\d+$/.test(user) &&
-        /^[A-Za-z0-9._-]+$/.test(pkg) &&
-        /^\d+$/.test(uid) &&
-        ["MOBILE","WIFI","LAN"].includes(x.network) &&
-        x.action==="BLOCK"
-      ){
-        next.set(
-          user+"|"+pkg+"|"+uid+"|"+x.network,
-          true
-        );
-      }
-    });
-
     if(writeBusy){
       toast("Policy update in progress");
       return;
     }
 
-    const current=policy;
-    const changes=[];
-
-    for(const key of current.keys()){
-      if(!next.has(key)){
-        changes.push([key,"ALLOW"]);
-      }
-    }
-
-    for(const key of next.keys()){
-      if(!current.has(key)){
-        changes.push([key,"BLOCK"]);
-      }
-    }
-
     writeBusy=true;
-    showBulkProgress("Import policy",changes.length);
+    showBulkProgress("Import policy",0);
 
-    let done=0;
+    const validation=await api("/policy-import",{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json"
+      },
+      body:text
+    });
 
-    for(const [key,action] of changes){
-      const p=key.split("|");
-      await postPolicy(p[0],p[1],p[2],p[3],action);
-      done++;
-      updateBulkProgress(done,changes.length);
+    const next=new Map();
+
+    if(Array.isArray(validation.rules)){
+      validation.rules.forEach(x=>{
+        next.set(
+          String(x.user)+"|"+
+          String(x.pkg)+"|"+
+          String(x.uid)+"|"+
+          x.network,
+          true
+        );
+      });
+    }
+
+    if(Array.isArray(validation.stale_rules) && validation.stale_rules.length){
+      showStaleImportModal(validation.stale_rules);
     }
 
     policy=next;
     updateRuleCount();
     policySignature=getPolicySignature();
     render();
-    finishBulkProgress(true,"Import policy complete","");
+
+    const summary=validation.summary||{};
+    const total=Number(summary.total||0);
+    const valid=Number(summary.valid||0);
+    const stale=Number(summary.stale||0);
+    const mismatch=Number(summary.uid_mismatch||0);
+
+    finishBulkProgress(
+      true,
+      "Import policy complete",
+      "Imported "+valid+" of "+total+" rules; skipped "+stale+" stale and "+mismatch+" UID-mismatch rules."
+    );
+
     setTaskStatus("READY");
     toast("Policy imported");
   }catch(e){
@@ -1418,17 +1431,45 @@ async function clearAll(){
   showClearConfirm();
 }
 
+let importWaitTimer=null;
+
 function showBulkProgress(title,total){
   setTaskStatus(title==="Import policy"?"IMPORTING":title==="Refresh app cache"?"REFRESHING":"UPDATING");
   const back=document.getElementById("bulkProgressBack");
   const state=document.getElementById("bulkProgressState");
   const close=document.getElementById("bulkProgressClose");
+  const status=document.getElementById("bulkProgressStatus");
+  const track=document.querySelector(".bulk-progress-track");
+  const meta=document.querySelector(".bulk-progress-meta");
+
+  if(importWaitTimer){
+    clearInterval(importWaitTimer);
+    importWaitTimer=null;
+  }
+
   document.getElementById("bulkProgressTitle").textContent=title;
   const preparing=title==="Refresh app cache";
-  document.getElementById("bulkProgressStatus").textContent=preparing?"Preparing application cache…":"Applying TIRN Security policy changes…";
-  document.getElementById("bulkProgressBar").style.width="0%";
-  document.getElementById("bulkProgressCount").textContent=preparing?"Preparing…":"0 / "+total;
-  document.getElementById("bulkProgressPercent").textContent=preparing?"—":"0%";
+  const importing=title==="Import policy";
+
+  if(importing){
+    status.textContent="Please wait.";
+    track.style.display="none";
+    meta.style.display="none";
+
+    let dots=1;
+    importWaitTimer=setInterval(()=>{
+      dots=dots===3?1:dots+1;
+      status.textContent="Please wait"+".".repeat(dots);
+    },500);
+  }else{
+    status.textContent=preparing?"Preparing application cache…":"Applying TIRN Security policy changes…";
+    track.style.display="block";
+    meta.style.display="flex";
+    document.getElementById("bulkProgressBar").style.width="0%";
+    document.getElementById("bulkProgressCount").textContent=preparing?"Preparing…":"0 / "+total;
+    document.getElementById("bulkProgressPercent").textContent=preparing?"—":"0%";
+  }
+
   document.getElementById("bulkProgressError").textContent="";
   document.getElementById("bulkProgressError").classList.remove("show");
   state.textContent=preparing?"PREPARING":"RUNNING";
@@ -1449,6 +1490,13 @@ function finishBulkProgress(success,message,code){
   const close=document.getElementById("bulkProgressClose");
   const status=document.getElementById("bulkProgressStatus");
   const error=document.getElementById("bulkProgressError");
+  const importing=!!importWaitTimer;
+
+  if(importWaitTimer){
+    clearInterval(importWaitTimer);
+    importWaitTimer=null;
+  }
+
   state.textContent=success?"COMPLETE":"FAILED";
   state.className="bulk-progress-state "+(success?"ok":"err");
   status.textContent=message;
@@ -1456,6 +1504,11 @@ function finishBulkProgress(success,message,code){
     error.textContent="";
     error.classList.remove("show");
     setTaskStatus("READY");
+
+    if(importing){
+      document.getElementById("bulkProgressBack").style.display="none";
+      return;
+    }
   }else{
     error.textContent=code+(message?" — "+message:"");
     error.classList.add("show");
@@ -1467,6 +1520,71 @@ function finishBulkProgress(success,message,code){
 function hideBulkProgress(){
   if(writeBusy)return;
   document.getElementById("bulkProgressBack").style.display="none";
+}
+
+function showStaleImportModal(staleRules){
+  const back=document.getElementById("staleImportBack");
+  const summary=document.getElementById("staleImportSummary");
+  const rules=document.getElementById("staleImportRules");
+
+  const grouped=new Map();
+
+  staleRules.forEach(x=>{
+    const key=String(x.user)+"|"+String(x.pkg)+"|"+String(x.uid);
+    if(!grouped.has(key)){
+      grouped.set(key,{
+        user:String(x.user),
+        pkg:String(x.pkg),
+        uid:String(x.uid),
+        reason:String(x.reason||"Application not installed or UID changed"),
+        networks:[]
+      });
+    }
+
+    const item=grouped.get(key);
+    const network=String(x.network||"");
+    if(network && !item.networks.includes(network)){
+      item.networks.push(network);
+    }
+  });
+
+  const total=staleRules.length;
+  summary.textContent=
+    total+" stale rule"+(total===1?"":"s")+" "+
+    "skipped and not imported.";
+
+  rules.innerHTML="";
+
+  grouped.forEach(item=>{
+    const row=document.createElement("div");
+    row.className="stale-import-rule";
+
+    const title=document.createElement("div");
+    title.className="stale-import-rule-title";
+    title.textContent=item.pkg;
+
+    const detail=document.createElement("div");
+    detail.className="stale-import-rule-detail";
+    const networks=item.networks.length
+      ? " · Networks: "+item.networks.join(", ")
+      : "";
+
+    detail.textContent=
+      "User "+item.user+
+      " · UID "+item.uid+
+      networks+
+      " · "+(item.reason||"Application not installed or UID changed");
+
+    row.appendChild(title);
+    row.appendChild(detail);
+    rules.appendChild(row);
+  });
+
+  back.style.display="flex";
+}
+
+function hideStaleImportModal(){
+  document.getElementById("staleImportBack").style.display="none";
 }
 
 function showClearConfirm(){

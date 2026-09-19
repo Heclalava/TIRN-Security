@@ -1,0 +1,194 @@
+#!/system/bin/sh
+
+echo "Content-Type: application/json"
+echo "Cache-Control: no-store"
+echo
+
+DATA_DIR="/data/adb/tirnsecurity"
+APPS="$DATA_DIR/apps.json"
+
+BODY="$(cat)"
+
+[ -n "$BODY" ] || {
+    printf '{"status":"ERROR","error":"Empty request"}\n'
+    exit 1
+}
+
+APPMAP="$DATA_DIR/import-apps.map.$$"
+REPORT="$DATA_DIR/import-report.$$"
+
+trap 'rm -f "$APPMAP" "$REPORT" "$STALE_REPORT"' EXIT
+
+# Build app lookup map once
+sed 's/},{/}\n{/g' "$APPS" |
+awk '
+{
+    user=""; pkg=""; uid=""; name=""; profile="";
+
+    if (match($0,/"user":"[^"]+"/))
+        user=substr($0,RSTART+8,RLENGTH-9);
+
+    if (match($0,/"pkg":"[^"]+"/))
+        pkg=substr($0,RSTART+7,RLENGTH-8);
+
+    if (match($0,/"uid":"[0-9]+"/))
+        uid=substr($0,RSTART+7,RLENGTH-8);
+
+    if (match($0,/"name":"[^"]+"/))
+        name=substr($0,RSTART+8,RLENGTH-9);
+
+    if (match($0,/"user_profile":"[^"]+"/))
+        profile=substr($0,RSTART+17,RLENGTH-18);
+
+    if (match($0,/"profile":"[^"]+"/))
+        profile=substr($0,RSTART+11,RLENGTH-12);
+
+    if (user != "" && pkg != "")
+        print user "|" pkg "|" profile "|" uid "|" name;
+}
+' > "$APPMAP"
+
+
+TOTAL=0
+VALID=0
+MISSING=0
+MISMATCH=0
+
+STALE_REPORT="$DATA_DIR/import-stale.tmp"
+: > "$STALE_REPORT"
+
+# Parse exported policy objects
+printf '%s\n' "$BODY" |
+awk '
+BEGIN {
+    in_policy=0
+    depth=0
+    record=""
+}
+
+{
+    line=$0
+
+    if (!in_policy && line ~ /"policy"[[:space:]]*:[[:space:]]*\[/) {
+        in_policy=1
+        next
+    }
+
+    if (in_policy) {
+
+        if (line ~ /^[[:space:]]*\{/ || depth > 0)
+            record = record line
+
+        depth += gsub(/\{/, "{", line)
+        depth -= gsub(/\}/, "}", line)
+
+        if (depth == 0 && record ~ /"uid"[[:space:]]*:/ && record ~ /"network"[[:space:]]*:/) {
+            gsub(/[[:space:]]+/, " ", record)
+            print record
+            record=""
+        }
+    }
+}
+' > "$REPORT"
+
+while IFS= read -r line
+do
+    TOTAL=$((TOTAL+1))
+
+    UID="$(printf '%s\n' "$line" | sed -n 's/.*"uid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p')"
+    NETWORK="$(printf '%s\n' "$line" | sed -n 's/.*"network"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+
+    USER="$(printf '%s\n' "$line" | sed -n 's/.*"user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    PKG="$(printf '%s\n' "$line" | sed -n 's/.*"pkg"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    PROFILE="$(printf '%s\n' "$line" | sed -n 's/.*"profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+
+    CURRENT_UID="$(awk -F'|' -v u="$USER" -v p="$PKG" '
+        $1 == u && $2 == p {
+            print $4
+            exit
+        }
+    ' "$APPMAP")"
+
+    if [ -z "$CURRENT_UID" ]; then
+        MISSING=$((MISSING+1))
+        printf '%s|%s|%s|%s|%s\n' "$USER" "$PKG" "$UID" "$NETWORK" "Application not installed" >> "$STALE_REPORT"
+    else
+        if [ "$CURRENT_UID" = "$UID" ]; then
+            VALID=$((VALID+1))
+        else
+            MISMATCH=$((MISMATCH+1))
+            printf "%s|%s|%s|%s|%s\n" "$USER" "$PKG" "$UID" "$NETWORK" "UID changed" >> "$STALE_REPORT"
+        fi
+    fi
+done < "$REPORT"
+
+# Write only validated rules
+NEW_POLICY="$DATA_DIR/policy.conf.new"
+: > "$NEW_POLICY"
+
+while IFS= read -r line
+do
+    UID="$(printf '%s\n' "$line" | sed -n 's/.*"uid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p')"
+    NETWORK="$(printf '%s\n' "$line" | sed -n 's/.*"network"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+
+    USER="$(printf '%s\n' "$line" | sed -n 's/.*"user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    PKG="$(printf '%s\n' "$line" | sed -n 's/.*"pkg"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+
+    MATCH="$(grep "^$USER|$PKG|" "$APPMAP" 2>/dev/null)"
+
+    if [ -n "$MATCH" ]; then
+        CURRENT_UID="$(printf '%s\n' "$MATCH" | cut -d'|' -f4)"
+
+        if [ "$CURRENT_UID" = "$UID" ]; then
+            printf '%s|%s|%s|%s|BLOCK\n' "$USER" "$PKG" "$UID" "$NETWORK" >> "$NEW_POLICY"
+        fi
+    fi
+
+done < "$REPORT"
+
+RULES_JSON=""
+
+if [ -s "$NEW_POLICY" ]; then
+    RULES_JSON="$(awk -F'|' '
+    BEGIN { first=1 }
+    {
+        if (!first)
+            printf ","
+        printf "{\"uid\":\"%s\",\"user\":\"%s\",\"pkg\":\"%s\",\"network\":\"%s\",\"action\":\"BLOCK\"}",$3,$1,$2,$4
+        first=0
+    }
+    ' "$NEW_POLICY")"
+fi
+
+if [ -s "$NEW_POLICY" ]; then
+    mv "$NEW_POLICY" "$DATA_DIR/policy.conf"
+else
+    rm -f "$NEW_POLICY"
+fi
+
+STALE_JSON=""
+
+if [ -s "$STALE_REPORT" ]; then
+    STALE_JSON="$(awk -F'|' '
+    BEGIN { first=1 }
+    {
+        if (!first)
+            printf ","
+
+        printf "{\"user\":\"%s\",\"pkg\":\"%s\",\"uid\":\"%s\",\"network\":\"%s\",\"reason\":\"%s\"}",$1,$2,$3,$4,$5
+
+        first=0
+    }
+    ' "$STALE_REPORT")"
+fi
+
+STALE_COUNT=0
+
+if [ -n "$STALE_JSON" ]; then
+    STALE_COUNT="$(printf '%s\n' "$STALE_JSON" | tr -cd '{' | wc -c)"
+fi
+
+printf '{"status":"OK","summary":{"total":"%s","valid":"%s","stale":"%s","stale_count":"%s","uid_mismatch":"%s"},"message":"Stale rules were skipped because the application is no longer installed or the UID changed.","stale_rules":[%s],"rules":[%s]}\n' \
+    "$TOTAL" "$VALID" "$MISSING" "$STALE_COUNT" "$MISMATCH" "$STALE_JSON" "$RULES_JSON"
+
+exit 0

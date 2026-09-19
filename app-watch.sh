@@ -2,6 +2,7 @@
 
 MODDIR="${0%/*}"
 DATA_DIR="/data/adb/tirnsecurity"
+POLICY_FILE="$DATA_DIR/policy.conf"
 LOGCAT="/system/bin/logcat"
 SH="/system/bin/sh"
 
@@ -74,6 +75,18 @@ process_queue() {
         fi
 
         if [ "$STATUS" -eq 0 ]; then
+            if [ "$ACTION" = "REMOVED" ]; then
+                POLICY_TMP="$DATA_DIR/policy.conf.tmp.$$"
+
+                if awk -F"|" -v pkg="$PACKAGE" '$2 != pkg {print}' "$POLICY_FILE" > "$POLICY_TMP"; then
+                    mv -f "$POLICY_TMP" "$POLICY_FILE"
+                    log_info "Policy" "Removed package rules" "$PACKAGE"
+                else
+                    rm -f "$POLICY_TMP"
+                    log_error "Policy" "Package rule cleanup failed" "$PACKAGE"
+                fi
+            fi
+
             "$SH" "$MODDIR/app-queue.sh" remove >/dev/null 2>&1
             log_info "Package" "Database updated" "$ACTION $PACKAGE"
         elif printf '%s\n' "$RESULT" | grep -q "APPS_BUSY"; then
