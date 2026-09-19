@@ -1,194 +1,233 @@
 #!/system/bin/sh
 
 echo "Content-Type: application/json"
-echo "Cache-Control: no-store"
+echo "Cache-Control: no-store, no-cache, must-revalidate, max-age=0"
+echo "Pragma: no-cache"
+echo "Expires: 0"
 echo
 
-DATA_DIR="/data/adb/tirnsecurity"
-APPS="$DATA_DIR/apps.json"
+data_dir="/data/adb/tirnsecurity"
+apps="$data_dir/apps.json"
+body="$(cat)"
+apps_json="$(cat "$apps" 2>/dev/null)"
 
-BODY="$(cat)"
-
-[ -n "$BODY" ] || {
-    printf '{"status":"ERROR","error":"Empty request"}\n'
+if [ -z "$apps_json" ]; then
+    printf '%s\n' '{"status":"ERROR","message":"Application cache is unavailable."}'
     exit 1
+fi
+
+sep='__TIRN_SECURITY_APPS_END_7f31c9__'
+
+printf '%s\n%s\n%s\n' "$apps_json" "$sep" "$body" |
+awk -v sep="$sep" '
+function json_escape(s,    t){
+    t=s
+    gsub(/\\/, "\\\\", t)
+    gsub(/"/, "\\\"", t)
+    gsub(/\r/, "\\r", t)
+    gsub(/\n/, "\\n", t)
+    gsub(/\t/, "\\t", t)
+    return t
 }
 
-APPMAP="$DATA_DIR/import-apps.map.$$"
-REPORT="$DATA_DIR/import-report.$$"
+function jval(o,k,    re,x){
+    re="\"" k "\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
+    if(match(o,re)){
+        x=substr(o,RSTART,RLENGTH)
+        sub("^[^:]*:[[:space:]]*\"", "", x)
+        sub("\"$", "", x)
+        return x
+    }
+    return ""
+}
 
-trap 'rm -f "$APPMAP" "$REPORT" "$STALE_REPORT"' EXIT
+function jbool(o,k,    re,x){
+    re="\"" k "\"[[:space:]]*:[[:space:]]*(true|false)"
+    if(match(o,re)){
+        x=substr(o,RSTART,RLENGTH)
+        sub("^[^:]*:[[:space:]]*", "", x)
+        return x
+    }
+    return "false"
+}
 
-# Build app lookup map once
-sed 's/},{/}\n{/g' "$APPS" |
-awk '
+function process_app(o,    u,uid,pkg,name,sys,id){
+    u=jval(o,"user")
+    uid=jval(o,"uid")
+    pkg=jval(o,"pkg")
+    name=jval(o,"name")
+    sys=jbool(o,"system")
+
+    if(uid!="" && pkg!="" && u!=""){
+        app_uid[u SUBSEP pkg SUBSEP name]=uid
+        app_name[u SUBSEP pkg SUBSEP name]=name
+        app_system[u SUBSEP pkg SUBSEP name]=sys
+        apps_seen++
+    } else {
+        id=jval(o,"id")
+        if(id!="" && name!=""){
+            profile_name[id]=name
+            profiles_seen++
+        }
+    }
+}
+
+function scan_apps_char(c){
+    if(inq){
+        if(depth>1)obj=obj c
+        if(escp)escp=0
+        else if(c=="\\")escp=1
+        else if(c=="\"")inq=0
+        return
+    }
+
+    if(c=="\""){
+        if(depth>1)obj=obj c
+        inq=1
+        return
+    }
+
+    if(c=="{"){
+        if(depth==1)obj="{"
+        else if(depth>1)obj=obj c
+        depth++
+        return
+    }
+
+    if(depth>0){
+        if(depth>1)obj=obj c
+        if(c=="}"){
+            depth--
+            if(depth==1){
+                process_app(obj)
+                obj=""
+            }
+        }
+    }
+}
+
+function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,current_uid,current_name,current_profile){
+    uid=jval(o,"uid")
+    network=jval(o,"network")
+    action=jval(o,"action")
+
+    if(uid=="" && network=="" && action=="")
+        return
+
+    total++
+
+    user=jval(o,"user")
+    pkg=jval(o,"pkg")
+    name=jval(o,"name")
+    profile=jval(o,"profile")
+    sys=jbool(o,"system")
+
+    if(network!="LAN" && network!="MOBILE" && network!="WIFI"){
+        stale++
+        stale_count++
+        stale_json=stale_json (stale_json?",":"") \
+            "{\"reason\":\"INVALID_NETWORK\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\",\"app\":{\"name\":\"" json_escape(name) "\",\"pkg\":\"" json_escape(pkg) "\",\"user\":\"" json_escape(user) "\",\"profile\":\"" json_escape(profile) "\",\"system\":" sys "}}"
+        return
+    }
+
+    if(action!="BLOCK"){
+        stale++
+        stale_count++
+        stale_json=stale_json (stale_json?",":"") \
+            "{\"reason\":\"INVALID_ACTION\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\",\"app\":{\"name\":\"" json_escape(name) "\",\"pkg\":\"" json_escape(pkg) "\",\"user\":\"" json_escape(user) "\",\"profile\":\"" json_escape(profile) "\",\"system\":" sys "}}"
+        return
+    }
+
+    key=user SUBSEP pkg SUBSEP name
+    current_uid=app_uid[key]
+    current_name=app_name[key]
+    current_profile=profile_name[user]
+
+    if(current_uid==""){
+        stale++
+        stale_count++
+        stale_json=stale_json (stale_json?",":"") \
+            "{\"reason\":\"APP_MISSING\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\",\"app\":{\"name\":\"" json_escape(name) "\",\"pkg\":\"" json_escape(pkg) "\",\"user\":\"" json_escape(user) "\",\"profile\":\"" json_escape(profile) "\",\"system\":" sys "}}"
+        return
+    }
+
+    if(current_uid!=uid){
+        stale++
+        stale_count++
+        uid_mismatch++
+        stale_json=stale_json (stale_json?",":"") \
+            "{\"reason\":\"UID_CHANGED\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\",\"app\":{\"name\":\"" json_escape(name) "\",\"pkg\":\"" json_escape(pkg) "\",\"user\":\"" json_escape(user) "\",\"profile\":\"" json_escape(profile) "\",\"system\":" sys "},\"current\":{\"uid\":\"" json_escape(current_uid) "\",\"name\":\"" json_escape(current_name) "\",\"profile\":\"" json_escape(current_profile) "\"}}"
+        return
+    }
+
+    valid++
+    rules_json=rules_json (rules_json?",":"") \
+        "{\"user\":\"" json_escape(user) "\",\"pkg\":\"" json_escape(pkg) "\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\"}"
+}
+
+function scan_policy_char(c){
+    if(inq){
+        if(depth>1)obj=obj c
+        if(escp)escp=0
+        else if(c=="\\")escp=1
+        else if(c=="\"")inq=0
+        return
+    }
+
+    if(c=="\""){
+        if(depth>1)obj=obj c
+        inq=1
+        return
+    }
+
+    if(c=="{"){
+        if(depth==1)obj="{"
+        else if(depth>1)obj=obj c
+        depth++
+        return
+    }
+
+    if(depth>0){
+        if(depth>1)obj=obj c
+        if(c=="}"){
+            depth--
+            if(depth==1){
+                process_policy(obj)
+                obj=""
+            }
+        }
+    }
+}
+
 {
-    user=""; pkg=""; uid=""; name=""; profile="";
-
-    if (match($0,/"user":"[^"]+"/))
-        user=substr($0,RSTART+8,RLENGTH-9);
-
-    if (match($0,/"pkg":"[^"]+"/))
-        pkg=substr($0,RSTART+7,RLENGTH-8);
-
-    if (match($0,/"uid":"[0-9]+"/))
-        uid=substr($0,RSTART+7,RLENGTH-8);
-
-    if (match($0,/"name":"[^"]+"/))
-        name=substr($0,RSTART+8,RLENGTH-9);
-
-    if (match($0,/"user_profile":"[^"]+"/))
-        profile=substr($0,RSTART+17,RLENGTH-18);
-
-    if (match($0,/"profile":"[^"]+"/))
-        profile=substr($0,RSTART+11,RLENGTH-12);
-
-    if (user != "" && pkg != "")
-        print user "|" pkg "|" profile "|" uid "|" name;
-}
-' > "$APPMAP"
-
-
-TOTAL=0
-VALID=0
-MISSING=0
-MISMATCH=0
-
-STALE_REPORT="$DATA_DIR/import-stale.tmp"
-: > "$STALE_REPORT"
-
-# Parse exported policy objects
-printf '%s\n' "$BODY" |
-awk '
-BEGIN {
-    in_policy=0
-    depth=0
-    record=""
-}
-
-{
-    line=$0
-
-    if (!in_policy && line ~ /"policy"[[:space:]]*:[[:space:]]*\[/) {
-        in_policy=1
+    if($0==sep){
+        phase=1
         next
     }
 
-    if (in_policy) {
-
-        if (line ~ /^[[:space:]]*\{/ || depth > 0)
-            record = record line
-
-        depth += gsub(/\{/, "{", line)
-        depth -= gsub(/\}/, "}", line)
-
-        if (depth == 0 && record ~ /"uid"[[:space:]]*:/ && record ~ /"network"[[:space:]]*:/) {
-            gsub(/[[:space:]]+/, " ", record)
-            print record
-            record=""
-        }
+    if(phase==0){
+        for(i=1;i<=length($0);i++)
+            scan_apps_char(substr($0,i,1))
+    } else {
+        for(i=1;i<=length($0);i++)
+            scan_policy_char(substr($0,i,1))
     }
 }
-' > "$REPORT"
 
-while IFS= read -r line
-do
-    TOTAL=$((TOTAL+1))
-
-    UID="$(printf '%s\n' "$line" | sed -n 's/.*"uid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p')"
-    NETWORK="$(printf '%s\n' "$line" | sed -n 's/.*"network"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-
-    USER="$(printf '%s\n' "$line" | sed -n 's/.*"user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-    PKG="$(printf '%s\n' "$line" | sed -n 's/.*"pkg"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-    PROFILE="$(printf '%s\n' "$line" | sed -n 's/.*"profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-
-    CURRENT_UID="$(awk -F'|' -v u="$USER" -v p="$PKG" '
-        $1 == u && $2 == p {
-            print $4
-            exit
-        }
-    ' "$APPMAP")"
-
-    if [ -z "$CURRENT_UID" ]; then
-        MISSING=$((MISSING+1))
-        printf '%s|%s|%s|%s|%s\n' "$USER" "$PKG" "$UID" "$NETWORK" "Application not installed" >> "$STALE_REPORT"
-    else
-        if [ "$CURRENT_UID" = "$UID" ]; then
-            VALID=$((VALID+1))
-        else
-            MISMATCH=$((MISMATCH+1))
-            printf "%s|%s|%s|%s|%s\n" "$USER" "$PKG" "$UID" "$NETWORK" "UID changed" >> "$STALE_REPORT"
-        fi
-    fi
-done < "$REPORT"
-
-# Write only validated rules
-NEW_POLICY="$DATA_DIR/policy.conf.new"
-: > "$NEW_POLICY"
-
-while IFS= read -r line
-do
-    UID="$(printf '%s\n' "$line" | sed -n 's/.*"uid"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p')"
-    NETWORK="$(printf '%s\n' "$line" | sed -n 's/.*"network"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-
-    USER="$(printf '%s\n' "$line" | sed -n 's/.*"user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-    PKG="$(printf '%s\n' "$line" | sed -n 's/.*"pkg"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-
-    MATCH="$(grep "^$USER|$PKG|" "$APPMAP" 2>/dev/null)"
-
-    if [ -n "$MATCH" ]; then
-        CURRENT_UID="$(printf '%s\n' "$MATCH" | cut -d'|' -f4)"
-
-        if [ "$CURRENT_UID" = "$UID" ]; then
-            printf '%s|%s|%s|%s|BLOCK\n' "$USER" "$PKG" "$UID" "$NETWORK" >> "$NEW_POLICY"
-        fi
-    fi
-
-done < "$REPORT"
-
-RULES_JSON=""
-
-if [ -s "$NEW_POLICY" ]; then
-    RULES_JSON="$(awk -F'|' '
-    BEGIN { first=1 }
-    {
-        if (!first)
-            printf ","
-        printf "{\"uid\":\"%s\",\"user\":\"%s\",\"pkg\":\"%s\",\"network\":\"%s\",\"action\":\"BLOCK\"}",$3,$1,$2,$4
-        first=0
+END{
+    if(!profiles_seen || !apps_seen){
+        print "{\"status\":\"ERROR\",\"message\":\"Application cache is invalid or incomplete.\"}"
+        exit
     }
-    ' "$NEW_POLICY")"
-fi
 
-if [ -s "$NEW_POLICY" ]; then
-    mv "$NEW_POLICY" "$DATA_DIR/policy.conf"
-else
-    rm -f "$NEW_POLICY"
-fi
-
-STALE_JSON=""
-
-if [ -s "$STALE_REPORT" ]; then
-    STALE_JSON="$(awk -F'|' '
-    BEGIN { first=1 }
-    {
-        if (!first)
-            printf ","
-
-        printf "{\"user\":\"%s\",\"pkg\":\"%s\",\"uid\":\"%s\",\"network\":\"%s\",\"reason\":\"%s\"}",$1,$2,$3,$4,$5
-
-        first=0
+    if(!total){
+        print "{\"status\":\"ERROR\",\"message\":\"No policy records were found in the import file.\"}"
+        exit
     }
-    ' "$STALE_REPORT")"
-fi
 
-STALE_COUNT=0
+    msg=(stale_count ? "Stale rules were skipped because the application is no longer installed or the UID changed." : "Import validation successful.")
 
-if [ -n "$STALE_JSON" ]; then
-    STALE_COUNT="$(printf '%s\n' "$STALE_JSON" | tr -cd '{' | wc -c)"
-fi
-
-printf '{"status":"OK","summary":{"total":"%s","valid":"%s","stale":"%s","stale_count":"%s","uid_mismatch":"%s"},"message":"Stale rules were skipped because the application is no longer installed or the UID changed.","stale_rules":[%s],"rules":[%s]}\n' \
-    "$TOTAL" "$VALID" "$MISSING" "$STALE_COUNT" "$MISMATCH" "$STALE_JSON" "$RULES_JSON"
-
-exit 0
+    printf "{\"status\":\"OK\",\"summary\":{\"total\":\"%d\",\"valid\":\"%d\",\"stale\":\"%d\",\"stale_count\":\"%d\",\"uid_mismatch\":\"%d\"},\"message\":\"%s\",\"stale_rules\":[%s],\"rules\":[%s]}\n", \
+        total,valid,stale,stale_count,uid_mismatch,msg,stale_json,rules_json
+}
+'
