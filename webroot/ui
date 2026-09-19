@@ -54,7 +54,7 @@ button{color:inherit}
   z-index:60;
 }
 .main-menu.show{display:block}
-.main-menu .menu-separator{height:1px;margin:4px 8px;background:var(--border);opacity:.7}
+.main-menu .menu-separator{height:1px;margin:6px 4px;background:var(--line);opacity:1}
 .main-menu button{
   display:block;
   width:100%;
