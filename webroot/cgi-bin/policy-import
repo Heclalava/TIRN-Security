@@ -30,13 +30,94 @@ function json_escape(s,    t){
     return t
 }
 
+function hexval(c){
+    if(c>="0" && c<="9") return c+0
+    if(c>="a" && c<="f") return 10 + index("abcdef",c)-1
+    if(c>="A" && c<="F") return 10 + index("ABCDEF",c)-1
+    return -1
+}
+
+function utf8(cp,    b){
+    if(cp<128)
+        return sprintf("%c",cp)
+    if(cp<2048)
+        return sprintf("%c%c",192+int(cp/64),128+(cp%64))
+    if(cp<65536)
+        return sprintf("%c%c%c",224+int(cp/4096),128+(int(cp/64)%64),128+(cp%64))
+    return sprintf("%c%c%c%c",240+int(cp/262144),128+(int(cp/4096)%64),128+(int(cp/64)%64),128+(cp%64))
+}
+
+function json_unescape(s,    out,i,c,n,h,cp,lo,j){
+    out=""
+    i=1
+    while(i<=length(s)){
+        c=substr(s,i,1)
+        if(c!="\\"){
+            out=out c
+            i++
+            continue
+        }
+
+        if(i==length(s)){
+            out=out c
+            i++
+            continue
+        }
+
+        c=substr(s,i+1,1)
+
+        if(c=="u" && i+5<=length(s)){
+            h=substr(s,i+2,4)
+            cp=0
+            n=0
+            for(j=1;j<=4;j++){
+                n=hexval(substr(h,j,1))
+                if(n<0) break
+                cp=cp*16+n
+            }
+
+            if(j==5){
+                i+=6
+
+                if(cp>=55296 && cp<=56319 && substr(s,i,2)=="\\u" && i+5<=length(s)){
+                    h=substr(s,i+2,4)
+                    lo=0
+                    n=0
+                    for(j=1;j<=4;j++){
+                        n=hexval(substr(h,j,1))
+                        if(n<0) break
+                        lo=lo*16+n
+                    }
+                    if(j==5 && lo>=56320 && lo<=57343){
+                        cp=65536+(cp-55296)*1024+(lo-56320)
+                        i+=6
+                    }
+                }
+
+                out=out utf8(cp)
+                continue
+            }
+        }
+
+        if(c=="n") out=out "\n"
+        else if(c=="r") out=out "\r"
+        else if(c=="t") out=out "\t"
+        else if(c=="b") out=out sprintf("%c",8)
+        else if(c=="f") out=out sprintf("%c",12)
+        else out=out c
+
+        i+=2
+    }
+    return out
+}
+
 function jval(o,k,    re,x){
     re="\"" k "\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
     if(match(o,re)){
         x=substr(o,RSTART,RLENGTH)
         sub("^[^:]*:[[:space:]]*\"", "", x)
         sub("\"$", "", x)
-        return x
+        return json_unescape(x)
     }
     return ""
 }
@@ -162,7 +243,7 @@ function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,c
 
     valid++
     rules_json=rules_json (rules_json?",":"") \
-        "{\"user\":\"" json_escape(user) "\",\"pkg\":\"" json_escape(pkg) "\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\"}"
+        "{\"user\":\"" json_escape(user) "\",\"pkg\":\"" json_escape(pkg) "\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\"}"
 }
 
 function scan_policy_char(c){

@@ -538,6 +538,82 @@ button{color:inherit}
 .modal .danger{
   color:var(--red);
 }
+
+.stale-import-modal{
+  width:min(620px,calc(100vw - 28px));
+  max-height:calc(100vh - 28px);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+
+.stale-import-head{
+  flex:0 0 auto;
+}
+
+.stale-import-rules{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  border-top:1px solid rgba(128,128,128,.2);
+  border-bottom:1px solid rgba(128,128,128,.2);
+  margin:10px 0;
+  padding:4px 0;
+}
+
+.stale-import-rule{
+  padding:12px 0;
+  border-bottom:1px solid rgba(128,128,128,.16);
+}
+
+.stale-import-rule:last-child{
+  border-bottom:0;
+}
+
+.stale-import-rule-title{
+  font-weight:600;
+  margin-bottom:4px;
+}
+
+.stale-import-rule-detail{
+  font-size:13px;
+  line-height:1.45;
+  opacity:.82;
+  overflow-wrap:anywhere;
+}
+
+.stale-import-buttons{
+  display:flex;
+  justify-content:flex-end;
+  gap:8px;
+  margin-top:9px;
+  flex-wrap:wrap;
+}
+
+.stale-import-actions{
+  flex:0 0 auto;
+  display:flex;
+  justify-content:flex-end;
+  gap:8px;
+  flex-wrap:wrap;
+  padding-top:4px;
+}
+
+.stale-import-actions button:disabled,
+.stale-import-buttons button:disabled{
+  opacity:.5;
+  cursor:default;
+}
+
+.import-complete-modal{
+  width:min(420px,calc(100vw - 28px));
+}
+
+.import-complete-modal h2{
+  margin-top:0;
+}
+
 </style>
 </head>
 <body>
@@ -663,13 +739,40 @@ button{color:inherit}
   </div>
 </div>
 
+<div id="importCompleteBack" class="modal-back" onclick="if(event.target===this)hideImportCompleteModal()">
+  <div class="modal import-complete-modal">
+    <h2>Import completed successfully</h2>
+    <p id="importCompleteSummary"></p>
+    <button type="button" onclick="hideImportCompleteModal()">Close</button>
+  </div>
+</div>
+
 <div id="staleImportBack" class="modal-back" onclick="if(event.target===this)hideStaleImportModal()">
-  <div class="modal">
-    <h2>Import completed with stale rules skipped</h2>
-    <p id="staleImportSummary"></p>
-    <p id="staleImportMessage">These rules were not imported because the application is no longer installed or its UID has changed.</p>
-    <div id="staleImportRules"></div>
-    <button onclick="hideStaleImportModal()">Close</button>
+  <div class="modal stale-import-modal">
+    <div class="stale-import-head">
+      <h2>Import completed with stale rules skipped</h2>
+      <p id="staleImportSummary"></p>
+      </div>
+
+    <div id="staleImportRules" class="stale-import-rules"></div>
+
+    <div id="staleImportActions" class="stale-import-actions">
+      <button type="button"
+              class="stale-import-reject-all"
+              onclick="rejectAllStaleImports()">
+        Reject All
+      </button>
+      <button type="button"
+              class="stale-import-accept-all"
+              onclick="acceptAllStaleUidChanges()">
+        Accept All UID Changes
+      </button>
+      <button type="button"
+              class="stale-import-close"
+              onclick="hideStaleImportModal()">
+        Close
+      </button>
+    </div>
   </div>
 </div>
 
@@ -1346,6 +1449,36 @@ function exportBackup(){
   toast("Policy exported");
   setTaskStatus("READY");
 }
+async function commitImportedPolicy(candidate){
+  const lines=Array.from(candidate.keys()).sort();
+  const body=lines.length?lines.join("\n")+"\n":"";
+
+  const result=await api("/policy-import-commit",{
+    method:"POST",
+    headers:{
+      "Content-Type":"text/plain"
+    },
+    body:body
+  });
+
+  if(!result||result.status!=="OK"){
+    throw new Error(
+      result&&result.message
+        ? result.message
+        : "Policy import commit failed"
+    );
+  }
+
+  return result;
+}
+
+function applyImportedPolicy(candidate){
+  policy=new Map(candidate);
+  updateRuleCount();
+  policySignature=getPolicySignature();
+  render();
+}
+
 async function importBackup(file){
   setTaskStatus("IMPORTING");
   if(!file)return;
@@ -1366,6 +1499,11 @@ async function importBackup(file){
       return;
     }
 
+    staleImportItems=[];
+    staleImportCandidate=new Map();
+    staleImportBusy=false;
+    staleImportCommitStarted=false;
+
     writeBusy=true;
     showBulkProgress("Import policy",0);
 
@@ -1385,20 +1523,14 @@ async function importBackup(file){
           String(x.user)+"|"+
           String(x.pkg)+"|"+
           String(x.uid)+"|"+
-          x.network,
+          x.network+"|"+
+          String(x.action||"BLOCK"),
           true
         );
       });
     }
 
-    if(Array.isArray(validation.stale_rules) && validation.stale_rules.length){
-      showStaleImportModal(validation.stale_rules);
-    }
-
-    policy=next;
-    updateRuleCount();
-    policySignature=getPolicySignature();
-    render();
+    staleImportCandidate=new Map(next);
 
     const summary=validation.summary||{};
     const total=Number(summary.total||0);
@@ -1406,26 +1538,484 @@ async function importBackup(file){
     const stale=Number(summary.stale||0);
     const mismatch=Number(summary.uid_mismatch||0);
 
+    if(Array.isArray(validation.stale_rules) &&
+       validation.stale_rules.length){
+
+      staleImportItems=buildStaleImportItems(
+        validation.stale_rules
+      ).map(item=>({
+        ...item,
+        state:"pending"
+      }));
+
+      finishBulkProgress(
+        true,
+        "Import validation complete",
+        "Validated "+valid+" of "+total+
+        " rules; "+stale+
+        " stale rules require review."
+      );
+
+      setTaskStatus("IMPORTING");
+      showStaleImportModal(validation.stale_rules);
+      return;
+    }
+
+    await commitImportedPolicy(next);
+    applyImportedPolicy(next);
+
     finishBulkProgress(
       true,
       "Import policy complete",
-      "Imported "+valid+" of "+total+" rules; skipped "+stale+" stale and "+mismatch+" UID-mismatch rules."
+      "Imported "+valid+" of "+total+
+      " rules; no stale rules detected."
+    );
+
+    setTaskStatus("READY");
+    toast("Policy imported");
+    showImportCompleteModal(valid);
+
+  }catch(e){
+    console.error("TIRN Security policy import failed:",e);
+
+    finishBulkProgress(
+      false,
+      "Import policy failed",
+      "PF-BULK-006"
+    );
+
+    setTaskStatus("ERROR");
+
+    await loadPolicy().catch(()=>{});
+    policySignature=getPolicySignature();
+    render();
+
+    toast("Import failed");
+  }finally{
+    if(!staleImportItems.some(x=>x.state==="pending")){
+      writeBusy=false;
+    }
+
+    document.getElementById("importFile").value="";
+  }
+}
+
+let staleImportItems=[];
+let staleImportBusy=false;
+let staleImportCandidate=new Map();
+let staleImportCommitStarted=false;
+
+function buildStaleImportItems(staleRules){
+  const grouped=new Map();
+
+  staleRules.forEach(x=>{
+    const app=x.app||{};
+    const current=x.current||{};
+    const key=
+      String(app.user||"")+
+      "|"+
+      String(app.pkg||"")+
+      "|"+
+      String(x.uid||"");
+
+    if(!grouped.has(key)){
+      grouped.set(key,{
+        key:key,
+        user:String(app.user||""),
+        profile:String(app.profile||""),
+        name:String(app.name||app.pkg||""),
+        pkg:String(app.pkg||""),
+        uid:String(x.uid||""),
+        currentUid:String(current.uid||""),
+        currentName:String(current.name||""),
+        currentProfile:String(current.profile||""),
+        reason:String(x.reason||"APP_MISSING"),
+        networks:[],
+        acceptedNetworks:[]
+      });
+    }
+
+    const item=grouped.get(key);
+    const network=String(x.network||"");
+
+    if(network && !item.networks.includes(network)){
+      item.networks.push(network);
+    }
+  });
+
+  return Array.from(grouped.values());
+}
+
+function staleImportCounts(){
+  let accepted=0;
+  let rejected=0;
+  let remaining=0;
+
+  staleImportItems.forEach(item=>{
+    if(item.state==="accepted")accepted++;
+    else if(item.state==="rejected")rejected++;
+    else remaining++;
+  });
+
+  return{
+    total:staleImportItems.length,
+    accepted:accepted,
+    rejected:rejected,
+    remaining:remaining
+  };
+}
+
+function updateStaleImportSummary(){
+  const summary=document.getElementById("staleImportSummary");
+  const actions=document.getElementById("staleImportActions");
+  const heading=document.querySelector("#staleImportBack h2");
+  const c=staleImportCounts();
+
+  summary.textContent=
+    c.remaining+
+    " remaining · "+
+    c.accepted+
+    " accepted · "+
+    c.rejected+
+    " rejected";
+
+  if(c.remaining>0){
+    heading.textContent="Import completed with stale rules detected";
+  }else{
+    heading.textContent="Import completed with all stale rules processed";
+  }
+
+  const pendingUid=staleImportItems.some(
+    x=>x.state==="pending"&&x.reason==="UID_CHANGED"
+  );
+
+  const acceptAll=actions.querySelector(".stale-import-accept-all");
+  const rejectAll=actions.querySelector(".stale-import-reject-all");
+  const close=actions.querySelector(".stale-import-close");
+
+  acceptAll.style.display=
+    c.remaining>0&&pendingUid
+      ? ""
+      : "none";
+
+  rejectAll.style.display=
+    c.remaining>0
+      ? ""
+      : "none";
+
+  close.disabled=staleImportBusy||c.remaining>0;
+}
+
+function renderStaleImportRules(){
+  const rules=document.getElementById("staleImportRules");
+  rules.innerHTML="";
+
+  staleImportItems.forEach((item,index)=>{
+    const row=document.createElement("div");
+    row.className="stale-import-rule";
+
+    const title=document.createElement("div");
+    title.className="stale-import-rule-title";
+    title.textContent=item.name;
+
+    const detail=document.createElement("div");
+    detail.className="stale-import-rule-detail";
+
+    const userLabel=item.profile
+      ? "User "+item.profile
+      : "User "+item.user;
+
+    const uidLabel=item.currentUid
+      ? "UID "+item.uid+" → "+item.currentUid
+      : "UID "+item.uid;
+
+    const networks=item.networks.length
+      ? " · Networks: "+item.networks.join(", ")
+      : "";
+
+    const packageLabel=item.pkg
+      ? " · Package: "+item.pkg
+      : "";
+
+    const reasonLabel=item.reason==="UID_CHANGED"
+      ? "App UID has changed"
+      : item.reason==="APP_MISSING"
+        ? "App is not installed"
+        : item.reason;
+
+    const stateLabel=item.state==="accepted"
+      ? " · Accepted & reassigned"
+      : item.state==="rejected"
+        ? " · Rejected"
+        : " · "+reasonLabel;
+
+    detail.textContent=
+      userLabel+
+      " · "+
+      uidLabel+
+      networks+
+      packageLabel+
+      stateLabel;
+
+    row.appendChild(title);
+    row.appendChild(detail);
+
+    if(item.state==="pending"){
+      const buttons=document.createElement("div");
+      buttons.className="stale-import-buttons";
+
+      const reject=document.createElement("button");
+      reject.type="button";
+      reject.className="stale-import-reject";
+      reject.textContent="Reject";
+      reject.disabled=staleImportBusy;
+      reject.onclick=()=>resolveStaleImport(index,false);
+
+      buttons.appendChild(reject);
+
+      if(item.reason==="UID_CHANGED"){
+        const accept=document.createElement("button");
+        accept.type="button";
+        accept.className="stale-import-accept";
+        accept.textContent="Accept & Reassign";
+        accept.disabled=staleImportBusy;
+        accept.onclick=()=>resolveStaleImport(index,true);
+        buttons.appendChild(accept);
+      }
+
+      row.appendChild(buttons);
+    }
+
+    rules.appendChild(row);
+  });
+
+  updateStaleImportSummary();
+}
+
+async function resolveStaleImport(index,accept){
+  const item=staleImportItems[index];
+
+  if(!item||item.state!=="pending"||staleImportBusy)return;
+
+  if(!accept){
+    item.state="rejected";
+    renderStaleImportRules();
+    await finishStaleImportIfDone();
+    return;
+  }
+
+  if(
+    item.reason!=="UID_CHANGED"||
+    !item.user||
+    !item.pkg||
+    !item.currentUid||
+    !item.networks.length
+  ){
+    return;
+  }
+
+  staleImportBusy=true;
+  renderStaleImportRules();
+
+  try{
+    const completed=item.acceptedNetworks||[];
+
+    for(const network of item.networks){
+      if(completed.includes(network))continue;
+
+      const key=
+        String(item.user)+"|"+
+        String(item.pkg)+"|"+
+        String(item.currentUid)+"|"+
+        network+"|BLOCK";
+
+      staleImportCandidate.set(key,true);
+      completed.push(network);
+    }
+
+    item.state="accepted";
+    item.acceptedNetworks=completed;
+  }catch(e){
+    console.error(
+      "TIRN Security stale policy reassignment failed:",
+      e
+    );
+    toast("Policy reassignment failed");
+  }finally{
+    staleImportBusy=false;
+    renderStaleImportRules();
+    await finishStaleImportIfDone();
+  }
+}
+
+async function acceptAllStaleUidChanges(){
+  if(staleImportBusy)return;
+
+  const indexes=[];
+
+  staleImportItems.forEach((item,index)=>{
+    if(item.state==="pending"&&item.reason==="UID_CHANGED"){
+      indexes.push(index);
+    }
+  });
+
+  if(!indexes.length)return;
+
+  staleImportBusy=true;
+  renderStaleImportRules();
+
+  let failed=0;
+
+  try{
+    for(const index of indexes){
+      const item=staleImportItems[index];
+
+      try{
+        const completed=item.acceptedNetworks||[];
+
+        for(const network of item.networks){
+          if(completed.includes(network))continue;
+
+          const key=
+            String(item.user)+"|"+
+            String(item.pkg)+"|"+
+            String(item.currentUid)+"|"+
+            network+"|BLOCK";
+
+          staleImportCandidate.set(key,true);
+          completed.push(network);
+        }
+
+        item.state="accepted";
+        item.acceptedNetworks=completed;
+      }catch(e){
+        failed++;
+        console.error(
+          "TIRN Security stale policy reassignment failed:",
+          e
+        );
+      }
+    }
+  }finally{
+    staleImportBusy=false;
+    renderStaleImportRules();
+
+    if(failed){
+      toast(
+        "Accepted "+(indexes.length-failed)+
+        " of "+indexes.length+
+        " UID changes"
+      );
+    }
+
+    await finishStaleImportIfDone();
+  }
+}
+
+function rejectAllStaleImports(){
+  if(staleImportBusy)return;
+
+  staleImportItems.forEach(item=>{
+    if(item.state==="pending"){
+      item.state="rejected";
+    }
+  });
+
+  renderStaleImportRules();
+  finishStaleImportIfDone();
+}
+
+async function finishStaleImportIfDone(){
+  const pending=staleImportItems.some(
+    x=>x.state==="pending"
+  );
+
+  updateRuleCount();
+  policySignature=getPolicySignature();
+  render();
+
+  if(pending)return;
+
+  if(staleImportCommitStarted)return;
+
+  staleImportCommitStarted=true;
+  staleImportBusy=true;
+  renderStaleImportRules();
+
+  try{
+    await commitImportedPolicy(staleImportCandidate);
+    applyImportedPolicy(staleImportCandidate);
+
+    const c=staleImportCounts();
+
+    finishBulkProgress(
+      true,
+      "Import policy complete",
+      "Imported "+c.accepted+
+      " accepted stale changes; rejected "+c.rejected+
+      " stale rules."
     );
 
     setTaskStatus("READY");
     toast("Policy imported");
   }catch(e){
-    finishBulkProgress(false,"Import policy failed","PF-BULK-006");
+    console.error(
+      "TIRN Security stale import commit failed:",
+      e
+    );
+
+    staleImportCommitStarted=false;
+
+    finishBulkProgress(
+      false,
+      "Import policy failed",
+      "PF-BULK-006"
+    );
+
     setTaskStatus("ERROR");
-    await loadPolicy().catch(()=>{});
+    toast("Import failed");
+    return;
+  }finally{
+    staleImportBusy=false;
+    writeBusy=false;
+    renderStaleImportRules();
+    updateRuleCount();
     policySignature=getPolicySignature();
     render();
-    toast("Import failed");
-  }finally{
-    writeBusy=false;
   }
+}
 
-  document.getElementById("importFile").value="";
+function showStaleImportModal(staleRules){
+  const back=document.getElementById("staleImportBack");
+  const actions=document.getElementById("staleImportActions");
+
+  staleImportItems=buildStaleImportItems(staleRules).map(item=>({
+    ...item,
+    state:"pending"
+  }));
+
+  staleImportCandidate=new Map(staleImportCandidate);
+
+  actions.querySelector(".stale-import-accept-all").onclick=
+    acceptAllStaleUidChanges;
+
+  actions.querySelector(".stale-import-reject-all").onclick=
+    rejectAllStaleImports;
+
+  renderStaleImportRules();
+  back.style.display="flex";
+}
+
+function hideStaleImportModal(){
+  if(staleImportBusy)return;
+
+  const pending=staleImportItems.some(
+    x=>x.state==="pending"
+  );
+
+  if(pending)return;
+
+  document.getElementById("staleImportBack").style.display="none";
 }
 
 async function clearAll(){
@@ -1528,69 +2118,21 @@ function hideBulkProgress(){
   document.getElementById("bulkProgressBack").style.display="none";
 }
 
-function showStaleImportModal(staleRules){
-  const back=document.getElementById("staleImportBack");
-  const summary=document.getElementById("staleImportSummary");
-  const rules=document.getElementById("staleImportRules");
+function showImportCompleteModal(total){
+  const summary=document.getElementById("importCompleteSummary");
 
-  const grouped=new Map();
-
-  staleRules.forEach(x=>{
-    const key=String(x.user)+"|"+String(x.pkg)+"|"+String(x.uid);
-    if(!grouped.has(key)){
-      grouped.set(key,{
-        user:String(x.user),
-        pkg:String(x.pkg),
-        uid:String(x.uid),
-        reason:String(x.reason||"Application not installed or UID changed"),
-        networks:[]
-      });
-    }
-
-    const item=grouped.get(key);
-    const network=String(x.network||"");
-    if(network && !item.networks.includes(network)){
-      item.networks.push(network);
-    }
-  });
-
-  const total=staleRules.length;
   summary.textContent=
-    total+" stale rule"+(total===1?"":"s")+" "+
-    "skipped and not imported.";
+    "Successfully imported "+
+    total+
+    " rule"+
+    (total===1?"":"s")+
+    " with no stale rules detected.";
 
-  rules.innerHTML="";
-
-  grouped.forEach(item=>{
-    const row=document.createElement("div");
-    row.className="stale-import-rule";
-
-    const title=document.createElement("div");
-    title.className="stale-import-rule-title";
-    title.textContent=item.pkg;
-
-    const detail=document.createElement("div");
-    detail.className="stale-import-rule-detail";
-    const networks=item.networks.length
-      ? " · Networks: "+item.networks.join(", ")
-      : "";
-
-    detail.textContent=
-      "User "+item.user+
-      " · UID "+item.uid+
-      networks+
-      " · "+(item.reason||"Application not installed or UID changed");
-
-    row.appendChild(title);
-    row.appendChild(detail);
-    rules.appendChild(row);
-  });
-
-  back.style.display="flex";
+  document.getElementById("importCompleteBack").style.display="flex";
 }
 
-function hideStaleImportModal(){
-  document.getElementById("staleImportBack").style.display="none";
+function hideImportCompleteModal(){
+  document.getElementById("importCompleteBack").style.display="none";
 }
 
 function showClearConfirm(){

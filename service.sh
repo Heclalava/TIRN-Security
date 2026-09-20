@@ -32,7 +32,9 @@ umask 077
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
-if [ "${1:-}" != "--policy-event" ] && [ "${1:-}" != "--refresh" ]; then
+if [ "${1:-}" != "--policy-event" ] &&
+   [ "${1:-}" != "--refresh" ] &&
+   [ "${1:-}" != "--import-policy" ]; then
     touch "$POLICY_FILE"
     chmod 600 "$POLICY_FILE"
 fi
@@ -54,23 +56,36 @@ acquire_firewall_lock() {
             continue
         fi
 
-        read -r LOCK_PID < "$FIREWALL_LOCK_OWNER"
+        read -r LOCK_PID LOCK_START < "$FIREWALL_LOCK_OWNER"
 
         if ! kill -0 "$LOCK_PID" 2>/dev/null; then
             rmdir "$FIREWALL_LOCK" 2>/dev/null || true
             continue
         fi
 
+        CURRENT_START="$(awk '{print $22}' /proc/$LOCK_PID/stat 2>/dev/null)"
+
+        if [ -n "$LOCK_START" ] && [ -n "$CURRENT_START" ] &&
+           [ "$LOCK_START" != "$CURRENT_START" ]; then
+            if [ "$(cat "$FIREWALL_LOCK_OWNER" 2>/dev/null)" = "$LOCK_PID $LOCK_START" ]; then
+                rmdir "$FIREWALL_LOCK" 2>/dev/null || true
+            fi
+            continue
+        fi
+
         sleep 0.05
         LOCK_WAIT=$((LOCK_WAIT + 1))
 
-        if [ "$LOCK_WAIT" -ge 200 ]; then
+        if [ "$LOCK_WAIT" -ge 1200 ]; then
             log_error "Firewall" "Lock timeout" "another firewall transaction is active"
             return 1
         fi
     done
 
-    printf '%s\n' "$$" > "$FIREWALL_LOCK_OWNER"
+    {
+        printf '%s\n' "$$"
+        awk '{print $22}' /proc/$$/stat 2>/dev/null || printf '0\n'
+    } > "$FIREWALL_LOCK_OWNER"
 
     return 0
 }
@@ -78,6 +93,48 @@ acquire_firewall_lock() {
 release_firewall_lock() {
     rm -f "$FIREWALL_LOCK_OWNER" 2>/dev/null || true
     rmdir "$FIREWALL_LOCK" 2>/dev/null || true
+}
+
+POLICY_LOCK="$DATA_DIR/policy.lock"
+
+acquire_policy_lock() {
+    POLICY_LOCK_WAIT=0
+
+    while ! mkdir "$POLICY_LOCK" 2>/dev/null; do
+        sleep 0.05
+        POLICY_LOCK_WAIT=$((POLICY_LOCK_WAIT + 1))
+
+        if [ "$POLICY_LOCK_WAIT" -ge 200 ]; then
+            log_error "Policy" "Lock timeout"                 "another policy transaction is active"
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+release_policy_lock() {
+    rmdir "$POLICY_LOCK" 2>/dev/null || true
+}
+
+clear_stale_boot_locks() {
+    for LOCK in "$FIREWALL_LOCK" "$POLICY_LOCK"; do
+        [ -e "$LOCK" ] || continue
+
+        OWNER="$LOCK/owner"
+
+        if [ -r "$OWNER" ]; then
+            read -r PID < "$OWNER"
+
+            if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                log_warn "Lock" "Active lock preserved" "lock=$LOCK pid=$PID"
+                continue
+            fi
+        fi
+
+        rm -rf "$LOCK" 2>/dev/null || true
+        log_warn "Lock" "Removed stale boot lock" "lock=$LOCK"
+    done
 }
 
 GENERATION_GUARD_CHAIN="TIRNFW-GUARD"
@@ -134,7 +191,14 @@ active_generation_ipv6() {
 
 
 generation_dispatcher_chain() {
-    printf 'TIRNFW-G%s\n' "$1"
+    case "$1" in
+        TIRNFW-G*)
+            printf '%s\n' "$1"
+            ;;
+        *)
+            printf 'TIRNFW-G%s\n' "$1"
+            ;;
+    esac
 }
 
 generation_mobile_chain() {
@@ -816,6 +880,7 @@ EOF
 prepare_policy() {
     PREPARED_POLICY="$1"
     PREPARED_COUNT="$2"
+    POLICY_SOURCE="${3:-$POLICY_FILE}"
 
     TMP_MAP="$DATA_DIR/apps.uidmap.$$"
     TMP_PREPARED="$PREPARED_POLICY.tmp.$$"
@@ -941,7 +1006,7 @@ prepare_policy() {
                 exit 2
             }
         }
-    ' "$TMP_MAP" "$POLICY_FILE" > "$TMP_NORMALIZED"; then
+    ' "$TMP_MAP" "$POLICY_SOURCE" > "$TMP_NORMALIZED"; then
         rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
         log_error "Policy" "Preparation failed" "policy validation or UID resolution failed"
         return 1
@@ -1197,7 +1262,7 @@ bootstrap_existing_install() {
     if ! generation_switch_transaction "$TMP_STATE" "$PREPARED_POLICY"; then
         rm -f "$TMP_STATE" "$PREPARED_POLICY" "$PREPARED_COUNT"
         release_firewall_lock
-        log_error "Firewall" "Existing install bootstrap failed"             "generation transaction failed"
+        log_error "Firewall" "Existing install bootstrap failed"             "generation transaction aborted; rollback completed or fail-closed retained"
         return 1
     fi
 
@@ -1321,7 +1386,7 @@ bootstrap_fresh_install() {
         rm -f "$TMP_STATE" "$PREPARED_POLICY" "$PREPARED_COUNT"
         release_firewall_lock
         log_error "Firewall" "Bootstrap failed" \
-            "generation transaction failed; fail-closed state retained"
+            "generation transaction aborted; fail-closed state retained"
         return 1
     fi
 
@@ -1777,9 +1842,9 @@ generation_verify_stable_dispatcher_family() {
             "-A $MAIN_CHAIN -j $GENERATION_GUARD_CHAIN")
                 GUARD_COUNT=$((GUARD_COUNT + 1))
                 ;;
-            "-A $MAIN_CHAIN -j TIRNFW-G"[0-9]*)
+            "-A $MAIN_CHAIN -j $EXPECTED")
                 GENERATION_COUNT=$((GENERATION_COUNT + 1))
-                GENERATION_TARGET="${RULE##*-j }"
+                GENERATION_TARGET="$EXPECTED"
                 GENERATION_POSITION="$POSITION"
                 ;;
             "-A $MAIN_CHAIN -j RETURN")
@@ -1834,6 +1899,103 @@ EOF
     return 0
 }
 
+generation_verify_retained_dispatcher_family() {
+    NEW_GEN="$1"
+    OLD_GEN="$2"
+    FAMILY="$3"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    NEW_CHAIN="$(generation_dispatcher_chain "$NEW_GEN")"
+    OLD_CHAIN=""
+    if [ -n "$OLD_GEN" ]; then
+        OLD_CHAIN="$(generation_dispatcher_chain "$OLD_GEN")"
+    fi
+
+    RULES="$($IPT -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
+
+    EXPECTED_RULES=0
+    POSITION=0
+    while IFS= read -r RULE; do
+        [ -n "$RULE" ] || continue
+        case "$RULE" in
+            "-N $MAIN_CHAIN") continue ;;
+        esac
+        POSITION=$((POSITION + 1))
+        case "$POSITION:$RULE" in
+            "1:-A $MAIN_CHAIN -j $NEW_CHAIN") EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            "2:-A $MAIN_CHAIN -j $GENERATION_GUARD_CHAIN") EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            "3:-A $MAIN_CHAIN -j $OLD_CHAIN") [ -n "$OLD_CHAIN" ] || return 1; EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            "3:-A $MAIN_CHAIN -j RETURN") [ -z "$OLD_CHAIN" ] || return 1; EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            "4:-A $MAIN_CHAIN -j RETURN") [ -n "$OLD_CHAIN" ] || return 1; EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            *) return 1 ;;
+        esac
+    done <<EOF
+$RULES
+EOF
+
+    if [ -n "$OLD_CHAIN" ]; then
+        [ "$POSITION" -eq 4 ] || return 1
+    else
+        [ "$POSITION" -eq 3 ] || return 1
+    fi
+
+    [ "$EXPECTED_RULES" -eq "$POSITION" ] || return 1
+    return 0
+}
+
+generation_verify_retained_final_dispatcher_family() {
+    NEW_GEN="$1"
+    OLD_GEN="$2"
+    FAMILY="$3"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    NEW_CHAIN="$(generation_dispatcher_chain "$NEW_GEN")"
+    OLD_CHAIN=""
+    if [ -n "$OLD_GEN" ]; then
+        OLD_CHAIN="$(generation_dispatcher_chain "$OLD_GEN")"
+    fi
+
+    RULES="$($IPT -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
+
+    EXPECTED_RULES=0
+    POSITION=0
+    while IFS= read -r RULE; do
+        [ -n "$RULE" ] || continue
+        case "$RULE" in
+            "-N $MAIN_CHAIN") continue ;;
+        esac
+        POSITION=$((POSITION + 1))
+        case "$POSITION:$RULE" in
+            "1:-A $MAIN_CHAIN -j $NEW_CHAIN") EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            "2:-A $MAIN_CHAIN -j $OLD_CHAIN") [ -n "$OLD_CHAIN" ] || return 1; EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            "2:-A $MAIN_CHAIN -j RETURN") [ -z "$OLD_CHAIN" ] || return 1; EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            "3:-A $MAIN_CHAIN -j RETURN") [ -n "$OLD_CHAIN" ] || return 1; EXPECTED_RULES=$((EXPECTED_RULES + 1)) ;;
+            *) return 1 ;;
+        esac
+    done <<EOF
+$RULES
+EOF
+
+    if [ -n "$OLD_CHAIN" ]; then
+        [ "$POSITION" -eq 3 ] || return 1
+    else
+        [ "$POSITION" -eq 2 ] || return 1
+    fi
+
+    [ "$EXPECTED_RULES" -eq "$POSITION" ] || return 1
+    return 0
+}
+
 generation_verify_stable_dispatcher_complete() {
     GEN="$1"
 
@@ -1878,6 +2040,47 @@ generation_verify_old_removed() {
 
     if [ -n "$OLD6" ] && generation_active_rule_ipv6 "$OLD6"; then
         return 1
+    fi
+
+    return 0
+}
+
+generation_finalize_retained_old() {
+    NEW_GEN="$1"
+    OLD4="$2"
+    OLD6="$3"
+
+    NEW4="$(generation_dispatcher_chain "$NEW_GEN")"
+    NEW6="$(generation_dispatcher_chain "$NEW_GEN")"
+
+    if [ -n "$OLD4" ]; then
+        generation_remove_active_ipv4_checked "$OLD4" || return 1
+    fi
+
+    if [ -n "$OLD6" ]; then
+        generation_remove_active_ipv6_checked "$OLD6" || return 1
+    fi
+
+    generation_active_rule_ipv4 "$NEW4" || return 1
+    generation_active_rule_ipv6 "$NEW6" || return 1
+    generation_verify_stable_dispatcher_complete "$NEW_GEN" || return 1
+
+    if [ -n "$OLD4" ]; then
+        OLD4_ID="${OLD4#TIRNFW-G}"
+        [ -n "$OLD4_ID" ] || return 1
+
+        if ! generation_delete_family "$OLD4_ID" ipv4; then
+            log_warn "Firewall" "Old IPv4 generation cleanup deferred"                 "generation=$OLD4"
+        fi
+    fi
+
+    if [ -n "$OLD6" ]; then
+        OLD6_ID="${OLD6#TIRNFW-G}"
+        [ -n "$OLD6_ID" ] || return 1
+
+        if ! generation_delete_family "$OLD6_ID" ipv6; then
+            log_warn "Firewall" "Old IPv6 generation cleanup deferred"                 "generation=$OLD6"
+        fi
     fi
 
     return 0
@@ -1979,14 +2182,20 @@ generation_restore_old() {
         if ! generation_active_rule_ipv4 "$OLD4"; then
             generation_install_active_ipv4 "$OLD4" || return 1
         fi
-        generation_active_rule_ipv4 "$OLD4" || return 1
+        if ! generation_active_rule_ipv4 "$OLD4"; then
+            debug_log "Firewall" "Rollback IPv4 active verification failed" "old=$OLD4"
+            return 1
+        fi
     fi
 
     if [ -n "$OLD6" ]; then
         if ! generation_active_rule_ipv6 "$OLD6"; then
             generation_install_active_ipv6 "$OLD6" || return 1
         fi
-        generation_active_rule_ipv6 "$OLD6" || return 1
+        if ! generation_active_rule_ipv6 "$OLD6"; then
+            debug_log "Firewall" "Rollback IPv6 active verification failed" "old=$OLD6"
+            return 1
+        fi
     fi
 
     if [ -z "$OLD4" ] && generation_active_rule_ipv4 "$NEW4"; then
@@ -2001,14 +2210,43 @@ generation_restore_old() {
         OLD4_ID="${OLD4#TIRNFW-G}"
         OLD6_ID="${OLD6#TIRNFW-G}"
 
-        [ "$OLD4_ID" = "$OLD6_ID" ] || return 1
-        generation_verify_stable_dispatcher_complete "$OLD4_ID" || return 1
+        if [ "$OLD4_ID" != "$OLD6_ID" ]; then
+            debug_log "Firewall" "Rollback generation mismatch" "old4=$OLD4 old6=$OLD6"
+            return 1
+        fi
+
+        generation_guard_remove || return 1
+
+        if ! generation_verify_stable_dispatcher_family "$OLD4_ID" ipv4; then
+            debug_log "Firewall" "Rollback IPv4 stable dispatcher verification failed" "generation=$OLD4_ID"
+            return 1
+        fi
+
+        if ! generation_verify_stable_dispatcher_family "$OLD6_ID" ipv6; then
+            debug_log "Firewall" "Rollback IPv6 stable dispatcher verification failed" "generation=$OLD6_ID"
+            return 1
+        fi
+
+        if generation_active_rule_ipv4 "$NEW4"; then
+            debug_log "Firewall" "Rollback left new IPv4 generation active" "generation=$NEW_GEN"
+            return 1
+        fi
+
+        if generation_active_rule_ipv6 "$NEW6"; then
+            debug_log "Firewall" "Rollback left new IPv6 generation active" "generation=$NEW_GEN"
+            return 1
+        fi
     elif [ -z "$OLD4" ] && [ -z "$OLD6" ]; then
         if generation_active_rule_ipv4 "$NEW4" ||
            generation_active_rule_ipv6 "$NEW6"; then
             return 1
         fi
     else
+        return 1
+    fi
+
+    if [ "${TIRN_DEV_MODE:-0}" -eq 1 ] && [ "${TIRN_TEST_FAIL_ROLLBACK_VERIFY:-0}" -eq 1 ]; then
+        log_error "Firewall" "TEST FAULT" "forcing rollback verification failure"
         return 1
     fi
 
@@ -2040,6 +2278,7 @@ generation_transaction_cleanup_new() {
 generation_switch_transaction() {
     NEW_STATE="$1"
     PREPARED_POLICY="$2"
+    RETAIN_OLD="${3:-0}"
 
     OLD4="$(active_generation_ipv4 2>/dev/null || true)"
     OLD6="$(active_generation_ipv6 2>/dev/null || true)"
@@ -2140,6 +2379,20 @@ generation_switch_transaction() {
         return 1
     fi
 
+    if [ "${TIRN_TEST_FAIL_ACTIVE_VERIFY:-0}" -eq 1 ]; then
+        log_warn "Firewall" "TEST MODE — injected active generation verification failure"             "generation=$NEW_GEN"
+
+        if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+            if generation_guard_remove; then
+                generation_transaction_cleanup_new "$NEW_GEN"
+                return 1
+            fi
+        fi
+
+        log_error "Firewall" "Rollback verification failed"             "generation=$NEW_GEN"
+        return 1
+    fi
+
     if ! generation_active_rule_ipv4 "$NEW4" ||
        ! generation_active_rule_ipv6 "$NEW6"; then
         log_error "Firewall" "Generation activation verification failed"             "generation=$NEW_GEN"
@@ -2176,26 +2429,48 @@ generation_switch_transaction() {
         return 1
     fi
 
-    if ! generation_remove_old_active_ipv4 "$OLD4" ||
-       ! generation_remove_old_active_ipv6 "$OLD6" ||
-       ! generation_verify_old_removed "$OLD4" "$OLD6"; then
-        log_error "Firewall" "Old generation removal failed"             "generation=$NEW_GEN old4=${OLD4:-none} old6=${OLD6:-none}"
+    if [ "$RETAIN_OLD" -eq 1 ]; then
+        log_info "Firewall" "Old generation retained"             "generation=$NEW_GEN old4=${OLD4:-none} old6=${OLD6:-none}"
+    else
+        if ! generation_remove_old_active_ipv4 "$OLD4" ||
+           ! generation_remove_old_active_ipv6 "$OLD6" ||
+           ! generation_verify_old_removed "$OLD4" "$OLD6"; then
+            log_error "Firewall" "Old generation removal failed"                 "generation=$NEW_GEN old4=${OLD4:-none} old6=${OLD6:-none}"
 
-        if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
-            if generation_guard_remove; then
-                generation_transaction_cleanup_new "$NEW_GEN"
+            if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+                if generation_guard_remove; then
+                    generation_transaction_cleanup_new "$NEW_GEN"
+                    return 1
+                fi
+
+                log_error "Firewall" "Guard removal after rollback failed"                     "generation=$NEW_GEN"
                 return 1
             fi
 
-            log_error "Firewall" "Guard removal after rollback failed"                 "generation=$NEW_GEN"
+            log_error "Firewall" "Rollback verification failed"                 "generation=$NEW_GEN"
             return 1
         fi
-
-        log_error "Firewall" "Rollback verification failed"             "generation=$NEW_GEN"
-        return 1
     fi
 
-    if ! generation_verify_stable_dispatcher_complete "$NEW_GEN"; then
+    if [ "$RETAIN_OLD" -eq 1 ]; then
+        if ! generation_verify_retained_dispatcher_family "$NEW_GEN" "${OLD4#TIRNFW-G}" ipv4 ||
+           ! generation_verify_retained_dispatcher_family "$NEW_GEN" "${OLD6#TIRNFW-G}" ipv6; then
+            log_error "Firewall" "Retained dispatcher verification failed"                 "generation=$NEW_GEN old4=${OLD4:-none} old6=${OLD6:-none}"
+
+            if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+                if generation_guard_remove; then
+                    generation_transaction_cleanup_new "$NEW_GEN"
+                    return 1
+                fi
+
+                log_error "Firewall" "Guard removal after rollback failed"                     "generation=$NEW_GEN"
+                return 1
+            fi
+
+            log_error "Firewall" "Rollback verification failed"                 "generation=$NEW_GEN"
+            return 1
+        fi
+    elif ! generation_verify_stable_dispatcher_complete "$NEW_GEN"; then
         log_error "Firewall" "Guarded stable dispatcher verification failed"             "generation=$NEW_GEN"
 
         if generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
@@ -2236,7 +2511,33 @@ generation_switch_transaction() {
         return 1
     fi
 
-    if ! generation_verify_stable_dispatcher_complete "$NEW_GEN" ||
+    if [ "$RETAIN_OLD" -eq 1 ]; then
+        if ! generation_verify_retained_final_dispatcher_family "$NEW_GEN" "${OLD4#TIRNFW-G}" ipv4 ||
+           ! generation_verify_retained_final_dispatcher_family "$NEW_GEN" "${OLD6#TIRNFW-G}" ipv6 ||
+           ! generation_active_rule_ipv4 "$NEW4" ||
+           ! generation_active_rule_ipv6 "$NEW6"; then
+            log_error "Firewall" "Post-guard retained verification failed"                 "generation=$NEW_GEN"
+
+            if ! generation_guard_install ||
+               ! generation_guard_verify; then
+                log_error "Firewall" "Fail-closed guard restoration failed"                     "generation=$NEW_GEN"
+                return 1
+            fi
+
+            if ! generation_restore_old "$NEW_GEN" "$OLD4" "$OLD6"; then
+                log_error "Firewall" "Rollback verification failed"                     "generation=$NEW_GEN"
+                return 1
+            fi
+
+            if ! generation_guard_remove; then
+                log_error "Firewall" "Guard removal after rollback failed"                     "generation=$NEW_GEN"
+                return 1
+            fi
+
+            generation_transaction_cleanup_new "$NEW_GEN"
+            return 1
+        fi
+    elif ! generation_verify_stable_dispatcher_complete "$NEW_GEN" ||
        ! generation_active_rule_ipv4 "$NEW4" ||
        ! generation_active_rule_ipv6 "$NEW6"; then
 
@@ -2262,17 +2563,19 @@ generation_switch_transaction() {
         return 1
     fi
 
-    if [ -n "$OLD4" ] && [ "$OLD4" != "$NEW4" ]; then
-        OLD4_ID="${OLD4#TIRNFW-G}"
-        if [ -n "$OLD4_ID" ]; then
-            generation_delete_family "$OLD4_ID" ipv4 ||                 log_warn "Firewall" "Old IPv4 generation cleanup deferred"                     "generation=$OLD4"
+    if [ "$RETAIN_OLD" -ne 1 ]; then
+        if [ -n "$OLD4" ] && [ "$OLD4" != "$NEW4" ]; then
+            OLD4_ID="${OLD4#TIRNFW-G}"
+            if [ -n "$OLD4_ID" ]; then
+                generation_delete_family "$OLD4_ID" ipv4 ||                     log_warn "Firewall" "Old IPv4 generation cleanup deferred"                     "generation=$OLD4"
+            fi
         fi
-    fi
 
-    if [ -n "$OLD6" ] && [ "$OLD6" != "$NEW6" ]; then
-        OLD6_ID="${OLD6#TIRNFW-G}"
-        if [ -n "$OLD6_ID" ]; then
-            generation_delete_family "$OLD6_ID" ipv6 ||                 log_warn "Firewall" "Old IPv6 generation cleanup deferred"                     "generation=$OLD6"
+        if [ -n "$OLD6" ] && [ "$OLD6" != "$NEW6" ]; then
+            OLD6_ID="${OLD6#TIRNFW-G}"
+            if [ -n "$OLD6_ID" ]; then
+                generation_delete_family "$OLD6_ID" ipv6 ||                     log_warn "Firewall" "Old IPv6 generation cleanup deferred"                     "generation=$OLD6"
+            fi
         fi
     fi
 
@@ -2407,6 +2710,415 @@ apply_policy() {
     return 1
 }
 
+import_policy_transaction() {
+    CANDIDATE_POLICY="$DATA_DIR/policy.import.$$"
+    PREPARED_POLICY="$DATA_DIR/policy.import.prepared.$$"
+    PREPARED_COUNT="$DATA_DIR/policy.import.count.$$"
+
+    TMP_STATE="$DATA_DIR/network.state.import.$$"
+    PREPARED_STATE="$DATA_DIR/network.state.import.prepared.$$"
+
+    TMP_POLICY="$DATA_DIR/policy.conf.import.$$"
+    TMP_APPLIED="$DATA_DIR/policy.applied.import.$$"
+
+    BACKUP_POLICY="$DATA_DIR/policy.conf.import.backup.$$"
+    BACKUP_APPLIED="$DATA_DIR/policy.applied.import.backup.$$"
+    BACKUP_STATE="$DATA_DIR/network.state.import.backup.$$"
+
+    IMPORT_MARKER="$DATA_DIR/policy.importing"
+
+    IMPORT_POLICY_LOCK=0
+    IMPORT_FIREWALL_LOCK=0
+    IMPORT_NEW_ACTIVE=0
+    IMPORT_ROLLBACK_OK=0
+    IMPORT_COMMIT_OK=0
+
+    IMPORT_OLD4=""
+    IMPORT_OLD6=""
+    IMPORT_NEW_GEN=""
+
+    IMPORT_POLICY_EXISTED=0
+    IMPORT_APPLIED_EXISTED=0
+    IMPORT_STATE_EXISTED=0
+
+    cleanup_import() {
+        rm -f \
+            "$CANDIDATE_POLICY" \
+            "$PREPARED_POLICY" \
+            "$PREPARED_COUNT" \
+            "$TMP_STATE" \
+            "$PREPARED_STATE" \
+            "$TMP_POLICY" \
+            "$TMP_APPLIED"
+
+        if [ "$IMPORT_COMMIT_OK" -eq 1 ] ||
+           [ "$IMPORT_ROLLBACK_OK" -eq 1 ]; then
+            rm -f \
+                "$BACKUP_POLICY" \
+                "$BACKUP_APPLIED" \
+                "$BACKUP_STATE" \
+                "$IMPORT_MARKER"
+        fi
+
+        if [ "$IMPORT_FIREWALL_LOCK" -eq 1 ]; then
+            release_firewall_lock
+            IMPORT_FIREWALL_LOCK=0
+        fi
+
+        if [ "$IMPORT_POLICY_LOCK" -eq 1 ]; then
+            release_policy_lock
+            IMPORT_POLICY_LOCK=0
+        fi
+    }
+
+    trap 'cleanup_import' EXIT
+
+    if ! cat > "$CANDIDATE_POLICY"; then
+        log_error "Policy" "Import failed" \
+            "unable to read candidate policy"
+        return 1
+    fi
+
+    chmod 600 "$CANDIDATE_POLICY" || {
+        log_error "Policy" "Import failed" \
+            "unable to protect candidate policy"
+        return 1
+    }
+
+    if ! acquire_policy_lock; then
+        log_error "Policy" "Import failed" \
+            "policy transaction busy"
+        return 1
+    fi
+
+    IMPORT_POLICY_LOCK=1
+
+    if ! acquire_firewall_lock; then
+        log_error "Policy" "Import failed" \
+            "firewall transaction busy"
+        return 1
+    fi
+
+    IMPORT_FIREWALL_LOCK=1
+
+    if ! (umask 077; : > "$IMPORT_MARKER"); then
+        log_error "Policy" "Import failed" \
+            "unable to create import marker"
+        return 1
+    fi
+
+    # Capture the currently active generation before constructing the
+    # replacement. RETAIN_OLD keeps these chains available until the
+    # persistent transaction has committed and verified all state.
+    IMPORT_OLD4="$(active_generation_ipv4 2>/dev/null || true)"
+    IMPORT_OLD6="$(active_generation_ipv6 2>/dev/null || true)"
+
+    # Preserve the exact pre-import persistent state, including whether
+    # each file existed at all.
+    if [ -e "$POLICY_FILE" ]; then
+        IMPORT_POLICY_EXISTED=1
+        if ! cp -f "$POLICY_FILE" "$BACKUP_POLICY"; then
+            log_error "Policy" "Import failed" \
+                "unable to back up policy.conf"
+            return 1
+        fi
+        chmod 600 "$BACKUP_POLICY" || return 1
+    fi
+
+    if [ -e "$POLICY_STATE_FILE" ]; then
+        IMPORT_APPLIED_EXISTED=1
+        if ! cp -f "$POLICY_STATE_FILE" "$BACKUP_APPLIED"; then
+            log_error "Policy" "Import failed" \
+                "unable to back up policy.applied"
+            return 1
+        fi
+        chmod 600 "$BACKUP_APPLIED" || return 1
+    fi
+
+    if [ -e "$STATE_FILE" ]; then
+        IMPORT_STATE_EXISTED=1
+        if ! cp -f "$STATE_FILE" "$BACKUP_STATE"; then
+            log_error "Policy" "Import failed" \
+                "unable to back up network.state"
+            return 1
+        fi
+        chmod 600 "$BACKUP_STATE" || return 1
+    fi
+
+    if ! prepare_policy \
+        "$PREPARED_POLICY" \
+        "$PREPARED_COUNT" \
+        "$CANDIDATE_POLICY"; then
+        log_error "Policy" "Import failed" \
+            "candidate policy preparation failed"
+        return 1
+    fi
+
+    if ! build_network_state > "$TMP_STATE"; then
+        log_error "Policy" "Import failed" \
+            "network state build failed"
+        return 1
+    fi
+
+    # Preserve an independent verification copy. TMP_STATE will later be
+    # moved atomically into place and therefore cannot be used afterwards.
+    if ! cp -f "$TMP_STATE" "$PREPARED_STATE"; then
+        log_error "Policy" "Import failed" \
+            "unable to preserve prepared network state"
+        return 1
+    fi
+
+    if ! cp -f "$PREPARED_POLICY" "$TMP_POLICY"; then
+        log_error "Policy" "Import failed" \
+            "unable to prepare policy.conf"
+        return 1
+    fi
+
+    if ! cp -f "$PREPARED_POLICY" "$TMP_APPLIED"; then
+        log_error "Policy" "Import failed" \
+            "unable to prepare policy.applied"
+        return 1
+    fi
+
+    chmod 600 \
+        "$TMP_POLICY" \
+        "$TMP_APPLIED" \
+        "$TMP_STATE" \
+        "$PREPARED_STATE" || {
+        log_error "Policy" "Import failed" \
+            "replacement file permissions preparation failed"
+        return 1
+    }
+
+    # Construct and activate the replacement generation while retaining the
+    # old generation for the complete filesystem transaction.
+    if ! generation_switch_transaction \
+        "$TMP_STATE" \
+        "$PREPARED_POLICY" \
+        1; then
+        log_error "Policy" "Import failed" \
+            "generation transaction aborted; existing policy retained"
+        return 1
+    fi
+
+    IMPORT_NEW_GEN="$NEW_GEN"
+    IMPORT_NEW_ACTIVE=1
+
+    # Commit each persistent file atomically. The old firewall generation
+    # remains available until every commit and verification has succeeded.
+    if [ "${TIRN_DEV_MODE:-0}" -eq 1 ] && [ "${TIRN_TEST_FAIL_POLICY_COMMIT:-0}" -eq 1 ]; then
+        log_error "Policy" "TEST FAULT" "forcing policy.conf commit failure"
+        IMPORT_COMMIT_FAILED=1
+    elif ! mv -f "$TMP_POLICY" "$POLICY_FILE"; then
+        log_error "Policy" "Import failed" \
+            "policy.conf commit failed; starting rollback"
+        IMPORT_COMMIT_FAILED=1
+    elif [ "${TIRN_DEV_MODE:-0}" -eq 1 ] && [ "${TIRN_TEST_FAIL_POLICY_APPLIED_COMMIT:-0}" -eq 1 ]; then
+        log_error "Policy" "TEST FAULT" "forcing policy.applied commit failure"
+        IMPORT_COMMIT_FAILED=1
+    elif ! mv -f "$TMP_APPLIED" "$POLICY_STATE_FILE"; then
+        log_error "Policy" "Import failed" \
+            "policy.applied commit failed; starting rollback"
+        IMPORT_COMMIT_FAILED=1
+    elif [ "${TIRN_DEV_MODE:-0}" -eq 1 ] && [ "${TIRN_TEST_FAIL_STATE_COMMIT:-0}" -eq 1 ]; then
+        log_error "Policy" "TEST FAULT" "forcing network.state commit failure"
+        IMPORT_COMMIT_FAILED=1
+    elif ! mv -f "$TMP_STATE" "$STATE_FILE"; then
+        log_error "Policy" "Import failed" \
+            "network.state commit failed; starting rollback"
+        IMPORT_COMMIT_FAILED=1
+    else
+        IMPORT_COMMIT_FAILED=0
+    fi
+
+    if [ "$IMPORT_COMMIT_FAILED" -eq 1 ]; then
+        if [ "$IMPORT_POLICY_EXISTED" -eq 1 ]; then
+            RESTORE_POLICY="$DATA_DIR/policy.conf.import.restore.$$"
+            if ! cp -f "$BACKUP_POLICY" "$RESTORE_POLICY" || ! chmod 600 "$RESTORE_POLICY" || ! mv -f "$RESTORE_POLICY" "$POLICY_FILE"; then
+                rm -f "$RESTORE_POLICY"
+                log_error "Policy" "Import rollback failed" \
+                    "unable to restore policy.conf"
+                return 1
+            fi
+        else
+            rm -f "$POLICY_FILE"
+        fi
+
+        if [ "$IMPORT_APPLIED_EXISTED" -eq 1 ]; then
+            RESTORE_APPLIED="$DATA_DIR/policy.applied.import.restore.$$"
+            if ! cp -f "$BACKUP_APPLIED" "$RESTORE_APPLIED" || ! chmod 600 "$RESTORE_APPLIED" || ! mv -f "$RESTORE_APPLIED" "$POLICY_STATE_FILE"; then
+                rm -f "$RESTORE_APPLIED"
+                log_error "Policy" "Import rollback failed" \
+                    "unable to restore policy.applied"
+                return 1
+            fi
+        else
+            rm -f "$POLICY_STATE_FILE"
+        fi
+
+        if [ "$IMPORT_STATE_EXISTED" -eq 1 ]; then
+            RESTORE_STATE="$DATA_DIR/network.state.import.restore.$$"
+            if ! cp -f "$BACKUP_STATE" "$RESTORE_STATE" || ! chmod 600 "$RESTORE_STATE" || ! mv -f "$RESTORE_STATE" "$STATE_FILE"; then
+                rm -f "$RESTORE_STATE"
+                log_error "Policy" "Import rollback failed" \
+                    "unable to restore network.state"
+                return 1
+            fi
+        else
+            rm -f "$STATE_FILE"
+        fi
+
+        if ! generation_guard_install ||
+           ! generation_guard_verify; then
+            log_error "Policy" "Import rollback failed" \
+                "unable to establish fail-closed guard"
+            return 1
+        fi
+
+        if ! generation_restore_old \
+            "$IMPORT_NEW_GEN" \
+            "$IMPORT_OLD4" \
+            "$IMPORT_OLD6"; then
+            log_error "Policy" "Import rollback failed" \
+                "old firewall generation could not be restored"
+            return 1
+        fi
+
+        generation_transaction_cleanup_new "$IMPORT_NEW_GEN"
+
+        if ! generation_guard_remove; then
+            log_error "Policy" "Import rollback failed" \
+                "guard removal failed"
+            return 1
+        fi
+
+        IMPORT_NEW_ACTIVE=0
+        IMPORT_ROLLBACK_OK=1
+
+        log_warn "Policy" "Import rolled back" \
+            "existing firewall generation and persistent policy restored"
+
+        return 1
+    fi
+
+    # Verify all three committed persistent files against their preserved
+    # prepared versions before the retained old generation is destroyed.
+    if ! cmp -s "$POLICY_FILE" "$PREPARED_POLICY" ||
+       ! cmp -s "$POLICY_STATE_FILE" "$PREPARED_POLICY" ||
+       ! cmp -s "$STATE_FILE" "$PREPARED_STATE"; then
+
+        log_error "Policy" "Import failed" \
+            "persistent state verification failed; starting rollback"
+
+        if [ "$IMPORT_POLICY_EXISTED" -eq 1 ]; then
+            RESTORE_POLICY="$DATA_DIR/policy.conf.import.restore.$$"
+            if ! cp -f "$BACKUP_POLICY" "$RESTORE_POLICY" || ! chmod 600 "$RESTORE_POLICY" || ! mv -f "$RESTORE_POLICY" "$POLICY_FILE"; then
+                rm -f "$RESTORE_POLICY"
+                log_error "Policy" "Import rollback failed" \
+                    "unable to restore policy.conf"
+                return 1
+            fi
+        else
+            rm -f "$POLICY_FILE"
+        fi
+
+        if [ "$IMPORT_APPLIED_EXISTED" -eq 1 ]; then
+            RESTORE_APPLIED="$DATA_DIR/policy.applied.import.restore.$$"
+            if ! cp -f "$BACKUP_APPLIED" "$RESTORE_APPLIED" || ! chmod 600 "$RESTORE_APPLIED" || ! mv -f "$RESTORE_APPLIED" "$POLICY_STATE_FILE"; then
+                rm -f "$RESTORE_APPLIED"
+                log_error "Policy" "Import rollback failed" \
+                    "unable to restore policy.applied"
+                return 1
+            fi
+        else
+            rm -f "$POLICY_STATE_FILE"
+        fi
+
+        if [ "$IMPORT_STATE_EXISTED" -eq 1 ]; then
+            RESTORE_STATE="$DATA_DIR/network.state.import.restore.$$"
+            if ! cp -f "$BACKUP_STATE" "$RESTORE_STATE" || ! chmod 600 "$RESTORE_STATE" || ! mv -f "$RESTORE_STATE" "$STATE_FILE"; then
+                rm -f "$RESTORE_STATE"
+                log_error "Policy" "Import rollback failed" \
+                    "unable to restore network.state"
+                return 1
+            fi
+        else
+            rm -f "$STATE_FILE"
+        fi
+
+        if ! generation_guard_install ||
+           ! generation_guard_verify; then
+            log_error "Policy" "Import rollback failed" \
+                "unable to establish fail-closed guard"
+            return 1
+        fi
+
+        if ! generation_restore_old \
+            "$IMPORT_NEW_GEN" \
+            "$IMPORT_OLD4" \
+            "$IMPORT_OLD6"; then
+            log_error "Policy" "Import rollback failed" \
+                "old firewall generation could not be restored"
+            return 1
+        fi
+
+        generation_transaction_cleanup_new "$IMPORT_NEW_GEN"
+
+        if ! generation_guard_remove; then
+            log_error "Policy" "Import rollback failed" \
+                "guard removal failed"
+            return 1
+        fi
+
+        IMPORT_NEW_ACTIVE=0
+        IMPORT_ROLLBACK_OK=1
+
+        log_warn "Policy" "Import rolled back" \
+            "persistent verification failure"
+
+        return 1
+    fi
+
+    # At this point:
+    #   - the new generation is active
+    #   - policy.conf is committed and verified
+    #   - policy.applied is committed and verified
+    #   - network.state is committed and verified
+    #
+    # The retained old generation is no longer required for rollback.
+    # Remove its dispatcher references first, then clean up its chains.
+    if ! generation_finalize_retained_old         "$IMPORT_NEW_GEN"         "$IMPORT_OLD4"         "$IMPORT_OLD6"; then
+        log_error "Policy" "Import failed"             "retained old generation dispatcher finalization failed"
+
+        if generation_guard_install && generation_guard_verify &&
+           generation_restore_old                "$IMPORT_NEW_GEN"                "$IMPORT_OLD4"                "$IMPORT_OLD6"; then
+            generation_transaction_cleanup_new "$IMPORT_NEW_GEN"
+
+            if generation_guard_remove; then
+                IMPORT_NEW_ACTIVE=0
+                IMPORT_ROLLBACK_OK=1
+
+                log_warn "Policy" "Import rolled back"                     "old generation dispatcher finalization failed"
+                return 1
+            fi
+        fi
+
+        log_error "Policy" "Import rollback failed"             "old generation dispatcher finalization left firewall in uncertain state"
+        return 1
+    fi
+
+    IMPORT_NEW_ACTIVE=0
+    IMPORT_COMMIT_OK=1
+
+    IMPORT_COUNT="$(wc -l < "$PREPARED_POLICY" 2>/dev/null)"
+    IMPORT_COUNT="$(printf '%s' "$IMPORT_COUNT" | tr -d ' ')"
+
+    log_info "Policy" "Import committed" \
+        "rules=$IMPORT_COUNT exact replacement"
+
+    return 0
+}
+
 if [ "${1:-}" = "--refresh" ]; then
     log_info "Refresh" "Started" "manual refresh requested"
 
@@ -2436,6 +3148,11 @@ if [ "${1:-}" = "--refresh" ]; then
     exit 1
 fi
 
+if [ "${1:-}" = "--import-policy" ]; then
+    import_policy_transaction
+    exit $?
+fi
+
 if [ "${1:-}" = "--policy-event" ]; then
     apply_policy
     exit $?
@@ -2443,9 +3160,11 @@ fi
 
 log_info "Service" "Started" "module initialization"
 
+clear_stale_boot_locks
+
 if ! bootstrap_initialize; then
     log_error "Service" "Initialization failed" \
-        "firewall remains fail-closed"
+        "firewall remains fail-closed; see preceding transaction error"
     exit 1
 fi
 
