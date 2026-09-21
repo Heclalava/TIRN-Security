@@ -539,6 +539,81 @@ button{color:inherit}
   color:var(--red);
 }
 
+.status-btn{
+  appearance:none;
+  border:0;
+  padding:0;
+  margin:0;
+  background:none;
+  color:var(--muted);
+  font:inherit;
+  cursor:pointer;
+}
+.status-btn:hover{
+  color:var(--text);
+}
+.status-btn.stale{
+  color:var(--red);
+  font-weight:700;
+}
+.status-btn:disabled{
+  color:var(--muted);
+  cursor:default;
+}
+ .stale-scan-loading{display:flex;align-items:center;gap:4px}.stale-scan-dots{display:inline-flex;gap:3px}.stale-scan-dots i{width:4px;height:4px;border-radius:50%;background:currentColor;opacity:.25;animation:staleScanDot 1.2s infinite ease-in-out}.stale-scan-dots i:nth-child(2){animation-delay:.15s}.stale-scan-dots i:nth-child(3){animation-delay:.3s}@keyframes staleScanDot{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-2px)}}
+.stale-audit-modal{
+  width:min(620px,calc(100vw - 28px));
+  max-height:calc(100vh - 28px);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+.stale-audit-head{
+  flex:0 0 auto;
+}
+.stale-audit-summary{
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.4;
+}
+.stale-audit-rules{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  border-top:1px solid rgba(128,128,128,.2);
+  border-bottom:1px solid rgba(128,128,128,.2);
+  margin:10px 0;
+  padding:4px 0;
+}
+.stale-audit-rule{
+  padding:12px 0;
+  border-bottom:1px solid rgba(128,128,128,.16);
+}
+.stale-audit-rule:last-child{
+  border-bottom:0;
+}
+.stale-audit-rule-title{
+  font-weight:600;
+  margin-bottom:4px;
+}
+.stale-audit-rule-detail{
+  font-size:13px;
+  line-height:1.45;
+  opacity:.82;
+  overflow-wrap:anywhere;
+}
+.stale-audit-actions{
+  flex:0 0 auto;
+  display:flex;
+  justify-content:flex-end;
+  gap:8px;
+  flex-wrap:wrap;
+  padding-top:4px;
+}
+.stale-audit-actions button{
+  min-width:110px;
+}
 .stale-import-modal{
   width:min(620px,calc(100vw - 28px));
   max-height:calc(100vh - 28px);
@@ -647,6 +722,8 @@ button{color:inherit}
         <span>•</span>
         <span><b id="ruleCount">0</b> <span id="blockedLabel">BLOCKED</span></span>
         <span>•</span>
+        <button id="staleCount" class="status-btn" onclick="showStaleAuditModal()" aria-label="View stale policy rules"><b id="staleRuleCount">0</b> STALE</button>
+        <span>•</span>
         <span id="taskStatus">READY</span>
       </div>
     </div>
@@ -657,6 +734,7 @@ button{color:inherit}
 
   <div id="mainMenu" class="main-menu">
     <button onclick="hideMainMenu();refreshAppCache()">Refresh app cache</button>
+    <button onclick="hideMainMenu();scanStaleRules(true)">Scan for stale rules</button>
     <div class="menu-separator"></div>
     <button onclick="hideMainMenu();downloadLogs()">Download logs</button>
     <button class="danger" onclick="hideMainMenu();showClearLogsConfirm('system')">Clear system log</button>
@@ -769,9 +847,9 @@ button{color:inherit}
 
 <div id="importProcessingBack" class="modal-back" style="z-index:120">
   <div class="modal import-processing-modal">
-    <h2>Applying policy changes</h2>
+    <h2 id="importProcessingTitle">Applying policy changes</h2>
     <p id="importProcessingText">
-      Please wait while your selected stale rule actions are applied.
+      Please wait while your policy changes are applied.
     </p>
     <div class="import-processing-spinner"></div>
   </div>
@@ -802,6 +880,21 @@ button{color:inherit}
               onclick="hideStaleImportModal()">
         Close
       </button>
+    </div>
+  </div>
+</div>
+
+<div id="staleAuditBack" class="modal-back" onclick="if(event.target===this&&!staleAuditBusy)hideStaleAuditModal()">
+  <div class="modal stale-audit-modal">
+    <div class="stale-audit-head">
+      <h2>Scanning for stale firewall rules</h2>
+      <p id="staleAuditSummary" class="stale-audit-summary">Scanning…</p>
+    </div>
+    <div id="staleAuditRules" class="stale-audit-rules">
+      <div class="loading stale-scan-loading"><span>Scanning firewall rules</span><span class="stale-scan-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+    </div>
+    <div class="stale-audit-actions">
+      <button id="staleAuditClose" type="button" onclick="if(!staleAuditBusy)hideStaleAuditModal()">Close</button>
     </div>
   </div>
 </div>
@@ -882,6 +975,202 @@ function updateRuleCount(){
   const el=document.getElementById("ruleCount");
   el.textContent=policy.size;
   el.classList.toggle("blocked-count",policy.size>0);
+}
+
+let staleAuditData={
+  status:"OK",
+  summary:{total_block_rules:0,valid:0,stale:0,stale_apps:0},
+  stale_rules:[]
+};
+let staleAuditBusy=false;
+
+function updateStaleAuditCount(){
+  const count=document.getElementById("staleRuleCount");
+  const button=document.getElementById("staleCount");
+  const stale=Number(staleAuditData?.summary?.stale||0);
+
+  count.textContent=stale;
+  button.classList.toggle("stale",stale>0);
+  button.title=stale
+    ? stale+" stale policy rule"+(stale===1?"":"s")+" detected"
+    : "No stale policy rules detected";
+}
+
+function renderStaleAudit(){
+  const summary=document.getElementById("staleAuditSummary");
+  const rules=document.getElementById("staleAuditRules");
+  const data=staleAuditData||{};
+  const s=data.summary||{};
+  const stale=Number(s.stale||0);
+  const staleApps=Number(s.stale_apps||0);
+
+  summary.textContent=
+    stale
+      ? stale+" stale rule"+(stale===1?"":"s")+
+        " across "+staleApps+
+        " affected app"+(staleApps===1?"":"s")+
+        ". No policy changes were made."
+      : "No stale policy rules detected. No policy changes were made.";
+
+  rules.innerHTML="";
+
+  if(!stale){
+    rules.innerHTML='<div class="empty">Policy is consistent with the current application cache.</div>';
+    return;
+  }
+
+  (Array.isArray(data.stale_rules)?data.stale_rules:[]).forEach(item=>{
+    const row=document.createElement("div");
+    row.className="stale-audit-rule";
+
+    const title=document.createElement("div");
+    title.className="stale-audit-rule-title";
+    title.textContent=String(item.name||item.pkg||"Unknown application");
+
+    const detail=document.createElement("div");
+    detail.className="stale-audit-rule-detail";
+
+    const reason=item.reason==="UID_CHANGED"
+      ? "UID changed"
+      : item.reason==="APP_MISSING"
+        ? "App is not installed"
+        : String(item.reason||"Unknown");
+
+    const uid=item.current_uid
+      ? "UID "+String(item.uid||"")+" → "+String(item.current_uid)
+      : "UID "+String(item.uid||"");
+
+    const networks=Array.isArray(item.networks)&&item.networks.length
+      ? " · Networks: "+item.networks.join(", ")
+      : "";
+
+    detail.textContent=
+      reason+
+      " · User "+String(item.user||"")+
+      " · "+
+      uid+
+      networks+
+      " · Package: "+
+      String(item.pkg||"");
+
+    row.appendChild(title);
+    row.appendChild(detail);
+    rules.appendChild(row);
+  });
+}
+
+async function scanStaleRules(showModal=false){
+  if(staleAuditBusy||writeBusy)return;
+
+  staleAuditBusy=true;
+  document.getElementById("staleAuditClose").disabled=true;
+  const rules=document.getElementById("staleAuditRules");
+  const summary=document.getElementById("staleAuditSummary");
+
+  if(showModal){
+    setTaskStatus("SCANNING");
+    showImportProcessingModal(
+      "Scanning for stale firewall rules",
+      "Checking current application UIDs and packages."
+    );
+  }
+
+  try{
+    const data=await api("/policy-stale-scan");
+    staleAuditData=data;
+    updateStaleAuditCount();
+
+    const stale=Number(data?.summary?.stale||0);
+
+    if(showModal&&stale>0&&Array.isArray(data.stale_rules)){
+      const importRules=[];
+
+      data.stale_rules.forEach(x=>{
+        const networks=Array.isArray(x.networks)
+          ? x.networks
+          : x.network
+            ? [x.network]
+            : [];
+
+        networks.forEach(network=>{
+          importRules.push({
+            ...x,
+            network:String(network),
+            app:{
+              name:x.name,
+              pkg:x.pkg,
+              user:x.user,
+              profile:x.profile||""
+            },
+            current:x.current_uid
+              ? {
+                  uid:x.current_uid,
+                  name:x.current_name||"",
+                  profile:x.current_profile||""
+                }
+              : {}
+          });
+        });
+      });
+
+      staleImportCandidate=new Map();
+      policy.forEach((value,key)=>{
+        staleImportCandidate.set(key+"|BLOCK",value);
+      });
+
+      importRules.forEach(x=>{
+        const key=
+          String(x.user)+"|"+
+          String(x.pkg)+"|"+
+          String(x.uid)+"|"+
+          String(x.network)+"|BLOCK";
+        staleImportCandidate.delete(key);
+      });
+
+      staleImportBusy=false;
+      staleImportCommitStarted=false;
+      staleImportMode="audit";
+      writeBusy=true;
+
+      if(showModal)hideImportProcessingModal();
+      showStaleImportModal(importRules);
+      return;
+    }
+
+    if(showModal){
+      hideImportProcessingModal();
+      renderStaleAudit();
+      document.getElementById("staleAuditBack").classList.add("show");
+    }
+  }catch(e){
+    console.error("TIRN Security stale policy scan failed:",e);
+
+    if(showModal){
+      hideImportProcessingModal();
+      summary.textContent="Stale policy scan failed.";
+      rules.innerHTML='<div class="empty">The policy audit endpoint is unavailable. The previous audit result has been retained.</div>';
+      document.getElementById("staleAuditBack").classList.add("show");
+    }
+
+    const button=document.getElementById("staleCount");
+    button.title="Stale policy audit unavailable";
+    setTaskStatus("ERROR");
+  }finally{
+    staleAuditBusy=false;
+    document.getElementById("staleAuditClose").disabled=false;
+    if(!writeBusy)setTaskStatus("READY");
+  }
+}
+
+function showStaleAuditModal(){
+  document.getElementById("staleAuditBack").classList.add("show");
+  document.getElementById("staleAuditClose").disabled=staleAuditBusy;
+  renderStaleAudit();
+}
+
+function hideStaleAuditModal(){
+  if(staleAuditBusy)return;
+  document.getElementById("staleAuditBack").classList.remove("show");
 }
 
 let policyRequestGeneration=0;
@@ -1479,11 +1768,11 @@ function exportBackup(){
   toast("Policy exported");
   setTaskStatus("READY");
 }
-async function commitImportedPolicy(candidate){
+async function commitImportedPolicy(candidate,endpoint="/policy-import-commit"){
   const lines=Array.from(candidate.keys()).sort();
   const body=lines.length?lines.join("\n")+"\n":"";
 
-  const result=await api("/policy-import-commit",{
+  const result=await api(endpoint,{
     method:"POST",
     headers:{
       "Content-Type":"text/plain"
@@ -1495,7 +1784,9 @@ async function commitImportedPolicy(candidate){
     throw new Error(
       result&&result.message
         ? result.message
-        : "Policy import commit failed"
+        : endpoint==="/policy-stale-commit"
+          ? "Stale policy reconciliation commit failed"
+          : "Policy import commit failed"
     );
   }
 
@@ -1533,9 +1824,13 @@ async function importBackup(file){
     staleImportCandidate=new Map();
     staleImportBusy=false;
     staleImportCommitStarted=false;
+    staleImportMode="import";
 
     writeBusy=true;
-    showBulkProgress("Import policy",0);
+    showImportProcessingModal(
+      "Applying policy changes",
+      "Validating and preparing the imported firewall policy."
+    );
 
     const validation=await api("/policy-import",{
       method:"POST",
@@ -1578,14 +1873,7 @@ async function importBackup(file){
         state:"pending"
       }));
 
-      finishBulkProgress(
-        true,
-        "Import validation complete",
-        "Validated "+valid+" of "+total+
-        " rules; "+stale+
-        " stale rules require review."
-      );
-
+      hideImportProcessingModal();
       setTaskStatus("IMPORTING");
       showStaleImportModal(validation.stale_rules);
       return;
@@ -1594,13 +1882,7 @@ async function importBackup(file){
     await commitImportedPolicy(next);
     applyImportedPolicy(next);
 
-    finishBulkProgress(
-      true,
-      "Import policy complete",
-      "Imported "+valid+" of "+total+
-      " rules; no stale rules detected."
-    );
-
+    hideImportProcessingModal();
     setTaskStatus("READY");
     toast("Policy imported");
     showImportCompleteModal(valid);
@@ -1608,12 +1890,7 @@ async function importBackup(file){
   }catch(e){
     console.error("TIRN Security policy import failed:",e);
 
-    finishBulkProgress(
-      false,
-      "Import policy failed",
-      "PF-BULK-006"
-    );
-
+    hideImportProcessingModal();
     setTaskStatus("ERROR");
 
     await loadPolicy().catch(()=>{});
@@ -1634,6 +1911,7 @@ let staleImportItems=[];
 let staleImportBusy=false;
 let staleImportCandidate=new Map();
 let staleImportCommitStarted=false;
+let staleImportMode="import";
 
 function buildStaleImportItems(staleRules){
   const grouped=new Map();
@@ -1709,10 +1987,12 @@ function updateStaleImportSummary(){
     c.rejected+
     " rejected";
 
+  const modeLabel=staleImportMode==="audit"?"Scan":"Import";
+
   if(c.remaining>0){
-    heading.textContent="Import completed with stale rules detected";
+    heading.textContent=modeLabel+" completed with stale rules detected";
   }else{
-    heading.textContent="Import completed with all stale rules processed";
+    heading.textContent=modeLabel+" completed with all stale rules processed";
   }
 
   const pendingUid=staleImportItems.some(
@@ -1836,11 +2116,13 @@ async function resolveStaleImport(index,accept){
 
   if(
     item.reason!=="UID_CHANGED"||
-    !item.user||
-    !item.pkg||
-    !item.currentUid||
+    String(item.user)===""||
+    String(item.pkg)===""||
+    String(item.currentUid)===""||
+    !Array.isArray(item.networks)||
     !item.networks.length
   ){
+    toast("Unable to reassign this stale rule");
     return;
   }
 
@@ -1973,44 +2255,55 @@ async function finishStaleImportIfDone(){
   renderStaleImportRules();
 
   hideStaleImportModal();
+  setTaskStatus("UPDATING");
+  const reconciliationMode=staleImportMode==="audit";
   showImportProcessingModal(
-    "Applying your stale rule choices and rebuilding the firewall policy."
+    reconciliationMode
+      ? "Reconciling stale firewall rules"
+      : "Applying policy changes",
+    reconciliationMode
+      ? "Applying your stale rule choices and rebuilding the firewall policy."
+      : "Applying your imported policy and rebuilding the firewall policy."
   );
 
   try{
-    await commitImportedPolicy(staleImportCandidate);
+    await commitImportedPolicy(staleImportCandidate,"/policy-stale-commit");
     applyImportedPolicy(staleImportCandidate);
+
+    staleAuditData={
+      status:"OK",
+      summary:{
+        total_block_rules:policy.size,
+        valid:policy.size,
+        stale:0,
+        stale_apps:0
+      },
+      stale_rules:[]
+    };
+    updateStaleAuditCount();
 
     const c=staleImportCounts();
 
-    finishBulkProgress(
-      true,
-      "Import policy complete",
-      "Imported "+c.accepted+
-      " accepted stale changes; rejected "+c.rejected+
-      " stale rules."
-    );
-
-    setTaskStatus("READY");
     hideImportProcessingModal();
-    toast("Policy imported");
+    setTaskStatus("READY");
+    toast(
+      "Stale policy rules processed: "+
+      c.accepted+
+      " reassigned, "+
+      c.rejected+
+      " rejected."
+    );
   }catch(e){
     console.error(
-      "TIRN Security stale import commit failed:",
+      "TIRN Security stale policy reconciliation failed:",
       e
     );
 
     staleImportCommitStarted=false;
 
-    finishBulkProgress(
-      false,
-      "Import policy failed",
-      "PF-BULK-006"
-    );
-
-    setTaskStatus("ERROR");
     hideImportProcessingModal();
-    toast("Import failed");
+    setTaskStatus("ERROR");
+    toast("Stale policy reconciliation failed");
     return;
   }finally{
     staleImportBusy=false;
@@ -2155,8 +2448,10 @@ function hideBulkProgress(){
   document.getElementById("bulkProgressBack").style.display="none";
 }
 
-function showImportProcessingModal(text){
+function showImportProcessingModal(title,text){
+  const h=document.getElementById("importProcessingTitle");
   const t=document.getElementById("importProcessingText");
+  if(title)h.textContent=title;
   if(text)t.textContent=text;
   document.getElementById("importProcessingBack").style.display="flex";
 }
@@ -2288,6 +2583,7 @@ async function confirmClearAll(){
 async function init(){
   try{
     await loadPolicy();
+    await scanStaleRules();
     await loadApps();
     await refreshAppRevision(true);
     await readNetwork();
@@ -2354,8 +2650,12 @@ async function refreshPolicy(force=false){
   }
 }
 
-window.addEventListener("pageshow",()=>refreshPolicy(true));
-window.addEventListener("focus",()=>refreshPolicy(true));
+window.addEventListener("pageshow",()=>{
+  refreshPolicy(true);
+});
+window.addEventListener("focus",()=>{
+  refreshPolicy(true);
+});
 
 setInterval(()=>{
   refreshPolicy(false);

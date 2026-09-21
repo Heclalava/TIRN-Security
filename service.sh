@@ -34,7 +34,8 @@ chmod 700 "$DATA_DIR"
 
 if [ "${1:-}" != "--policy-event" ] &&
    [ "${1:-}" != "--refresh" ] &&
-   [ "${1:-}" != "--import-policy" ]; then
+   [ "${1:-}" != "--import-policy" ] &&
+   [ "${1:-}" != "--reconcile-stale-policy" ]; then
     touch "$POLICY_FILE"
     chmod 600 "$POLICY_FILE"
 fi
@@ -120,20 +121,8 @@ release_policy_lock() {
 clear_stale_boot_locks() {
     for LOCK in "$FIREWALL_LOCK" "$POLICY_LOCK"; do
         [ -e "$LOCK" ] || continue
-
-        OWNER="$LOCK/owner"
-
-        if [ -r "$OWNER" ]; then
-            read -r PID < "$OWNER"
-
-            if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-                log_warn "Lock" "Active lock preserved" "lock=$LOCK pid=$PID"
-                continue
-            fi
-        fi
-
         rm -rf "$LOCK" 2>/dev/null || true
-        log_warn "Lock" "Removed stale boot lock" "lock=$LOCK"
+        log_warn "Lock" "Removed boot lock" "lock=$LOCK"
     done
 }
 
@@ -2711,6 +2700,20 @@ apply_policy() {
 }
 
 import_policy_transaction() {
+    IMPORT_CONTEXT="${1:-import}"
+
+    case "$IMPORT_CONTEXT" in
+        stale)
+            IMPORT_LABEL="Stale reconciliation"
+            ;;
+        import)
+            IMPORT_LABEL="Import"
+            ;;
+        *)
+            IMPORT_LABEL="Import"
+            ;;
+    esac
+
     CANDIDATE_POLICY="$DATA_DIR/policy.import.$$"
     PREPARED_POLICY="$DATA_DIR/policy.import.prepared.$$"
     PREPARED_COUNT="$DATA_DIR/policy.import.count.$$"
@@ -2774,19 +2777,19 @@ import_policy_transaction() {
     trap 'cleanup_import' EXIT
 
     if ! cat > "$CANDIDATE_POLICY"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "unable to read candidate policy"
         return 1
     fi
 
     chmod 600 "$CANDIDATE_POLICY" || {
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "unable to protect candidate policy"
         return 1
     }
 
     if ! acquire_policy_lock; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "policy transaction busy"
         return 1
     fi
@@ -2794,7 +2797,7 @@ import_policy_transaction() {
     IMPORT_POLICY_LOCK=1
 
     if ! acquire_firewall_lock; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "firewall transaction busy"
         return 1
     fi
@@ -2802,7 +2805,7 @@ import_policy_transaction() {
     IMPORT_FIREWALL_LOCK=1
 
     if ! (umask 077; : > "$IMPORT_MARKER"); then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "unable to create import marker"
         return 1
     fi
@@ -2818,7 +2821,7 @@ import_policy_transaction() {
     if [ -e "$POLICY_FILE" ]; then
         IMPORT_POLICY_EXISTED=1
         if ! cp -f "$POLICY_FILE" "$BACKUP_POLICY"; then
-            log_error "Policy" "Import failed" \
+            log_error "Policy" "$IMPORT_LABEL failed" \
                 "unable to back up policy.conf"
             return 1
         fi
@@ -2828,7 +2831,7 @@ import_policy_transaction() {
     if [ -e "$POLICY_STATE_FILE" ]; then
         IMPORT_APPLIED_EXISTED=1
         if ! cp -f "$POLICY_STATE_FILE" "$BACKUP_APPLIED"; then
-            log_error "Policy" "Import failed" \
+            log_error "Policy" "$IMPORT_LABEL failed" \
                 "unable to back up policy.applied"
             return 1
         fi
@@ -2838,7 +2841,7 @@ import_policy_transaction() {
     if [ -e "$STATE_FILE" ]; then
         IMPORT_STATE_EXISTED=1
         if ! cp -f "$STATE_FILE" "$BACKUP_STATE"; then
-            log_error "Policy" "Import failed" \
+            log_error "Policy" "$IMPORT_LABEL failed" \
                 "unable to back up network.state"
             return 1
         fi
@@ -2849,13 +2852,13 @@ import_policy_transaction() {
         "$PREPARED_POLICY" \
         "$PREPARED_COUNT" \
         "$CANDIDATE_POLICY"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "candidate policy preparation failed"
         return 1
     fi
 
     if ! build_network_state > "$TMP_STATE"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "network state build failed"
         return 1
     fi
@@ -2863,19 +2866,19 @@ import_policy_transaction() {
     # Preserve an independent verification copy. TMP_STATE will later be
     # moved atomically into place and therefore cannot be used afterwards.
     if ! cp -f "$TMP_STATE" "$PREPARED_STATE"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "unable to preserve prepared network state"
         return 1
     fi
 
     if ! cp -f "$PREPARED_POLICY" "$TMP_POLICY"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "unable to prepare policy.conf"
         return 1
     fi
 
     if ! cp -f "$PREPARED_POLICY" "$TMP_APPLIED"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "unable to prepare policy.applied"
         return 1
     fi
@@ -2885,7 +2888,7 @@ import_policy_transaction() {
         "$TMP_APPLIED" \
         "$TMP_STATE" \
         "$PREPARED_STATE" || {
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "replacement file permissions preparation failed"
         return 1
     }
@@ -2896,7 +2899,7 @@ import_policy_transaction() {
         "$TMP_STATE" \
         "$PREPARED_POLICY" \
         1; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "generation transaction aborted; existing policy retained"
         return 1
     fi
@@ -2910,21 +2913,21 @@ import_policy_transaction() {
         log_error "Policy" "TEST FAULT" "forcing policy.conf commit failure"
         IMPORT_COMMIT_FAILED=1
     elif ! mv -f "$TMP_POLICY" "$POLICY_FILE"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "policy.conf commit failed; starting rollback"
         IMPORT_COMMIT_FAILED=1
     elif [ "${TIRN_DEV_MODE:-0}" -eq 1 ] && [ "${TIRN_TEST_FAIL_POLICY_APPLIED_COMMIT:-0}" -eq 1 ]; then
         log_error "Policy" "TEST FAULT" "forcing policy.applied commit failure"
         IMPORT_COMMIT_FAILED=1
     elif ! mv -f "$TMP_APPLIED" "$POLICY_STATE_FILE"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "policy.applied commit failed; starting rollback"
         IMPORT_COMMIT_FAILED=1
     elif [ "${TIRN_DEV_MODE:-0}" -eq 1 ] && [ "${TIRN_TEST_FAIL_STATE_COMMIT:-0}" -eq 1 ]; then
         log_error "Policy" "TEST FAULT" "forcing network.state commit failure"
         IMPORT_COMMIT_FAILED=1
     elif ! mv -f "$TMP_STATE" "$STATE_FILE"; then
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "network.state commit failed; starting rollback"
         IMPORT_COMMIT_FAILED=1
     else
@@ -2936,7 +2939,7 @@ import_policy_transaction() {
             RESTORE_POLICY="$DATA_DIR/policy.conf.import.restore.$$"
             if ! cp -f "$BACKUP_POLICY" "$RESTORE_POLICY" || ! chmod 600 "$RESTORE_POLICY" || ! mv -f "$RESTORE_POLICY" "$POLICY_FILE"; then
                 rm -f "$RESTORE_POLICY"
-                log_error "Policy" "Import rollback failed" \
+                log_error "Policy" "$IMPORT_LABEL rollback failed" \
                     "unable to restore policy.conf"
                 return 1
             fi
@@ -2948,7 +2951,7 @@ import_policy_transaction() {
             RESTORE_APPLIED="$DATA_DIR/policy.applied.import.restore.$$"
             if ! cp -f "$BACKUP_APPLIED" "$RESTORE_APPLIED" || ! chmod 600 "$RESTORE_APPLIED" || ! mv -f "$RESTORE_APPLIED" "$POLICY_STATE_FILE"; then
                 rm -f "$RESTORE_APPLIED"
-                log_error "Policy" "Import rollback failed" \
+                log_error "Policy" "$IMPORT_LABEL rollback failed" \
                     "unable to restore policy.applied"
                 return 1
             fi
@@ -2960,7 +2963,7 @@ import_policy_transaction() {
             RESTORE_STATE="$DATA_DIR/network.state.import.restore.$$"
             if ! cp -f "$BACKUP_STATE" "$RESTORE_STATE" || ! chmod 600 "$RESTORE_STATE" || ! mv -f "$RESTORE_STATE" "$STATE_FILE"; then
                 rm -f "$RESTORE_STATE"
-                log_error "Policy" "Import rollback failed" \
+                log_error "Policy" "$IMPORT_LABEL rollback failed" \
                     "unable to restore network.state"
                 return 1
             fi
@@ -2970,7 +2973,7 @@ import_policy_transaction() {
 
         if ! generation_guard_install ||
            ! generation_guard_verify; then
-            log_error "Policy" "Import rollback failed" \
+            log_error "Policy" "$IMPORT_LABEL rollback failed" \
                 "unable to establish fail-closed guard"
             return 1
         fi
@@ -2979,7 +2982,7 @@ import_policy_transaction() {
             "$IMPORT_NEW_GEN" \
             "$IMPORT_OLD4" \
             "$IMPORT_OLD6"; then
-            log_error "Policy" "Import rollback failed" \
+            log_error "Policy" "$IMPORT_LABEL rollback failed" \
                 "old firewall generation could not be restored"
             return 1
         fi
@@ -2987,7 +2990,7 @@ import_policy_transaction() {
         generation_transaction_cleanup_new "$IMPORT_NEW_GEN"
 
         if ! generation_guard_remove; then
-            log_error "Policy" "Import rollback failed" \
+            log_error "Policy" "$IMPORT_LABEL rollback failed" \
                 "guard removal failed"
             return 1
         fi
@@ -2995,7 +2998,7 @@ import_policy_transaction() {
         IMPORT_NEW_ACTIVE=0
         IMPORT_ROLLBACK_OK=1
 
-        log_warn "Policy" "Import rolled back" \
+        log_warn "Policy" "$IMPORT_LABEL rolled back" \
             "existing firewall generation and persistent policy restored"
 
         return 1
@@ -3007,14 +3010,14 @@ import_policy_transaction() {
        ! cmp -s "$POLICY_STATE_FILE" "$PREPARED_POLICY" ||
        ! cmp -s "$STATE_FILE" "$PREPARED_STATE"; then
 
-        log_error "Policy" "Import failed" \
+        log_error "Policy" "$IMPORT_LABEL failed" \
             "persistent state verification failed; starting rollback"
 
         if [ "$IMPORT_POLICY_EXISTED" -eq 1 ]; then
             RESTORE_POLICY="$DATA_DIR/policy.conf.import.restore.$$"
             if ! cp -f "$BACKUP_POLICY" "$RESTORE_POLICY" || ! chmod 600 "$RESTORE_POLICY" || ! mv -f "$RESTORE_POLICY" "$POLICY_FILE"; then
                 rm -f "$RESTORE_POLICY"
-                log_error "Policy" "Import rollback failed" \
+                log_error "Policy" "$IMPORT_LABEL rollback failed" \
                     "unable to restore policy.conf"
                 return 1
             fi
@@ -3026,7 +3029,7 @@ import_policy_transaction() {
             RESTORE_APPLIED="$DATA_DIR/policy.applied.import.restore.$$"
             if ! cp -f "$BACKUP_APPLIED" "$RESTORE_APPLIED" || ! chmod 600 "$RESTORE_APPLIED" || ! mv -f "$RESTORE_APPLIED" "$POLICY_STATE_FILE"; then
                 rm -f "$RESTORE_APPLIED"
-                log_error "Policy" "Import rollback failed" \
+                log_error "Policy" "$IMPORT_LABEL rollback failed" \
                     "unable to restore policy.applied"
                 return 1
             fi
@@ -3038,7 +3041,7 @@ import_policy_transaction() {
             RESTORE_STATE="$DATA_DIR/network.state.import.restore.$$"
             if ! cp -f "$BACKUP_STATE" "$RESTORE_STATE" || ! chmod 600 "$RESTORE_STATE" || ! mv -f "$RESTORE_STATE" "$STATE_FILE"; then
                 rm -f "$RESTORE_STATE"
-                log_error "Policy" "Import rollback failed" \
+                log_error "Policy" "$IMPORT_LABEL rollback failed" \
                     "unable to restore network.state"
                 return 1
             fi
@@ -3048,7 +3051,7 @@ import_policy_transaction() {
 
         if ! generation_guard_install ||
            ! generation_guard_verify; then
-            log_error "Policy" "Import rollback failed" \
+            log_error "Policy" "$IMPORT_LABEL rollback failed" \
                 "unable to establish fail-closed guard"
             return 1
         fi
@@ -3057,7 +3060,7 @@ import_policy_transaction() {
             "$IMPORT_NEW_GEN" \
             "$IMPORT_OLD4" \
             "$IMPORT_OLD6"; then
-            log_error "Policy" "Import rollback failed" \
+            log_error "Policy" "$IMPORT_LABEL rollback failed" \
                 "old firewall generation could not be restored"
             return 1
         fi
@@ -3065,7 +3068,7 @@ import_policy_transaction() {
         generation_transaction_cleanup_new "$IMPORT_NEW_GEN"
 
         if ! generation_guard_remove; then
-            log_error "Policy" "Import rollback failed" \
+            log_error "Policy" "$IMPORT_LABEL rollback failed" \
                 "guard removal failed"
             return 1
         fi
@@ -3073,7 +3076,7 @@ import_policy_transaction() {
         IMPORT_NEW_ACTIVE=0
         IMPORT_ROLLBACK_OK=1
 
-        log_warn "Policy" "Import rolled back" \
+        log_warn "Policy" "$IMPORT_LABEL rolled back" \
             "persistent verification failure"
 
         return 1
@@ -3088,7 +3091,7 @@ import_policy_transaction() {
     # The retained old generation is no longer required for rollback.
     # Remove its dispatcher references first, then clean up its chains.
     if ! generation_finalize_retained_old         "$IMPORT_NEW_GEN"         "$IMPORT_OLD4"         "$IMPORT_OLD6"; then
-        log_error "Policy" "Import failed"             "retained old generation dispatcher finalization failed"
+        log_error "Policy" "$IMPORT_LABEL failed"             "retained old generation dispatcher finalization failed"
 
         if generation_guard_install && generation_guard_verify &&
            generation_restore_old                "$IMPORT_NEW_GEN"                "$IMPORT_OLD4"                "$IMPORT_OLD6"; then
@@ -3098,12 +3101,12 @@ import_policy_transaction() {
                 IMPORT_NEW_ACTIVE=0
                 IMPORT_ROLLBACK_OK=1
 
-                log_warn "Policy" "Import rolled back"                     "old generation dispatcher finalization failed"
+                log_warn "Policy" "$IMPORT_LABEL rolled back"                     "old generation dispatcher finalization failed"
                 return 1
             fi
         fi
 
-        log_error "Policy" "Import rollback failed"             "old generation dispatcher finalization left firewall in uncertain state"
+        log_error "Policy" "$IMPORT_LABEL rollback failed"             "old generation dispatcher finalization left firewall in uncertain state"
         return 1
     fi
 
@@ -3113,7 +3116,7 @@ import_policy_transaction() {
     IMPORT_COUNT="$(wc -l < "$PREPARED_POLICY" 2>/dev/null)"
     IMPORT_COUNT="$(printf '%s' "$IMPORT_COUNT" | tr -d ' ')"
 
-    log_info "Policy" "Import committed" \
+    log_info "Policy" "$IMPORT_LABEL committed" \
         "rules=$IMPORT_COUNT exact replacement"
 
     return 0
@@ -3149,7 +3152,12 @@ if [ "${1:-}" = "--refresh" ]; then
 fi
 
 if [ "${1:-}" = "--import-policy" ]; then
-    import_policy_transaction
+    import_policy_transaction "import"
+    exit $?
+fi
+
+if [ "${1:-}" = "--reconcile-stale-policy" ]; then
+    import_policy_transaction "stale"
     exit $?
 fi
 
