@@ -606,6 +606,26 @@ button{color:inherit}
   cursor:default;
 }
 
+.import-processing-modal{
+  max-width:320px;
+  text-align:center;
+}
+
+.import-processing-spinner{
+  width:28px;
+  height:28px;
+  margin:18px auto 5px;
+  border:3px solid var(--line);
+  border-top-color:var(--engine-green);
+  border-radius:50%;
+  animation:importSpin .8s linear infinite;
+}
+
+@keyframes importSpin{
+  from{transform:rotate(0deg)}
+  to{transform:rotate(360deg)}
+}
+
 .import-complete-modal{
   width:min(420px,calc(100vw - 28px));
 }
@@ -744,6 +764,16 @@ button{color:inherit}
     <h2>Import completed successfully</h2>
     <p id="importCompleteSummary"></p>
     <button type="button" onclick="hideImportCompleteModal()">Close</button>
+  </div>
+</div>
+
+<div id="importProcessingBack" class="modal-back" style="z-index:120">
+  <div class="modal import-processing-modal">
+    <h2>Applying policy changes</h2>
+    <p id="importProcessingText">
+      Please wait while your selected stale rule actions are applied.
+    </p>
+    <div class="import-processing-spinner"></div>
   </div>
 </div>
 
@@ -1942,6 +1972,11 @@ async function finishStaleImportIfDone(){
   staleImportBusy=true;
   renderStaleImportRules();
 
+  hideStaleImportModal();
+  showImportProcessingModal(
+    "Applying your stale rule choices and rebuilding the firewall policy."
+  );
+
   try{
     await commitImportedPolicy(staleImportCandidate);
     applyImportedPolicy(staleImportCandidate);
@@ -1957,6 +1992,7 @@ async function finishStaleImportIfDone(){
     );
 
     setTaskStatus("READY");
+    hideImportProcessingModal();
     toast("Policy imported");
   }catch(e){
     console.error(
@@ -1973,6 +2009,7 @@ async function finishStaleImportIfDone(){
     );
 
     setTaskStatus("ERROR");
+    hideImportProcessingModal();
     toast("Import failed");
     return;
   }finally{
@@ -2116,6 +2153,16 @@ function finishBulkProgress(success,message,code){
 function hideBulkProgress(){
   if(writeBusy)return;
   document.getElementById("bulkProgressBack").style.display="none";
+}
+
+function showImportProcessingModal(text){
+  const t=document.getElementById("importProcessingText");
+  if(text)t.textContent=text;
+  document.getElementById("importProcessingBack").style.display="flex";
+}
+
+function hideImportProcessingModal(){
+  document.getElementById("importProcessingBack").style.display="none";
 }
 
 function showImportCompleteModal(total){
