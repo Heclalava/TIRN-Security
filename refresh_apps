@@ -237,10 +237,12 @@ APK_LABEL_RESOLVER_SIG="$(/system/bin/stat -c '%i|%s|%Y' "$APK_LABEL" 2>/dev/nul
 
 APK_LABEL_STORE_HEADER="TIRN_APK_LABEL_CACHE|$APK_LABEL_STORE_VERSION|$TIRN_APK_LABEL_LOCALE|$APK_LABEL_RESOLVER_SIG"
 
+TAB="$(printf '\t')"
+
 while IFS= read -r apk
 do
     [ -z "$apk" ] && continue
-    /system/bin/stat -c '%n\t%i\t%s\t%Y' "$apk" >> "$APK_LABEL_META" || exit 1
+    /system/bin/stat -c "%n${TAB}%i${TAB}%s${TAB}%Y" "$apk" >> "$APK_LABEL_META" || exit 1
 done < "$APK_UNIQUE"
 
 # A cache is reusable only when its global identity matches.
