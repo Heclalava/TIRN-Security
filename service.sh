@@ -1547,13 +1547,13 @@ prepare_policy() {
             key = user SUBSEP pkg
 
             if (!(key in app_uid)) {
-                error = "unresolved app on line " line_no
-                exit 2
+                print user "|" pkg "|" uid "|" network "|" action
+                next
             }
 
             if (app_uid[key] != uid) {
-                error = "UID mismatch on line " line_no
-                exit 2
+                print user "|" pkg "|" uid "|" network "|" action
+                next
             }
 
             print user "|" pkg "|" uid "|" network "|" action
