@@ -35,7 +35,8 @@ chmod 700 "$DATA_DIR"
 if [ "${1:-}" != "--policy-event" ] &&
    [ "${1:-}" != "--refresh" ] &&
    [ "${1:-}" != "--import-policy" ] &&
-   [ "${1:-}" != "--reconcile-stale-policy" ]; then
+   [ "${1:-}" != "--reconcile-stale-policy" ] &&
+   [ "${1:-}" != "--remove-app-policy" ]; then
     touch "$POLICY_FILE"
     chmod 600 "$POLICY_FILE"
 fi
@@ -1023,6 +1024,152 @@ prepare_policy() {
     log_info "Policy" "Prepared" "rules=$PREPARED_RULE_COUNT"
     return 0
 }
+prepare_existing_policy_for_removal() {
+    PREPARED_POLICY="$1"
+    PREPARED_COUNT="$2"
+    POLICY_SOURCE="${3:-$POLICY_FILE}"
+    REMOVE_USER="$4"
+    REMOVE_PACKAGE="$5"
+    REMOVED_COUNT_FILE="$6"
+
+    TMP_PREPARED="$PREPARED_POLICY.tmp.$$"
+    TMP_NORMALIZED="$PREPARED_POLICY.normalized.$$"
+    TMP_REMOVED="$REMOVED_COUNT_FILE.tmp.$$"
+
+    rm -f "$TMP_PREPARED" "$TMP_NORMALIZED" \
+        "$TMP_REMOVED" "$PREPARED_POLICY" "$REMOVED_COUNT_FILE"
+
+    if ! awk -F'|' \
+        -v remove_user="$REMOVE_USER" \
+        -v remove_package="$REMOVE_PACKAGE" \
+        -v removed_file="$TMP_REMOVED" '
+        {
+            line_no++
+
+            if ($0 ~ /^[[:space:]]*#/)
+                next
+
+            if ($0 ~ /^[[:space:]]*$/)
+                next
+
+            if (NF != 5) {
+                error = "invalid field count on line " line_no
+                exit 2
+            }
+
+            user = $1
+            pkg = $2
+            uid = $3
+            network = $4
+            action = $5
+
+            if (user !~ /^[0-9]+$/ || user > 2147483647) {
+                error = "invalid user on line " line_no
+                exit 2
+            }
+
+            if (pkg !~ /^[A-Za-z0-9._-]+$/) {
+                error = "invalid package on line " line_no
+                exit 2
+            }
+
+            if (uid !~ /^[0-9]+$/ || uid < 1 || uid > 2147483647) {
+                error = "invalid UID on line " line_no
+                exit 2
+            }
+
+            if (network != "MOBILE" &&
+                network != "WIFI" &&
+                network != "LAN") {
+                error = "invalid network on line " line_no
+                exit 2
+            }
+
+            if (action != "BLOCK") {
+                error = "invalid action on line " line_no
+                exit 2
+            }
+
+            if (user == remove_user && pkg == remove_package) {
+                removed++
+                next
+            }
+
+            print user "|" pkg "|" uid "|" network "|" action
+            next
+        }
+
+        END {
+            if (error != "") {
+                print error > "/dev/stderr"
+                exit 2
+            }
+
+            print removed + 0 > removed_file
+        }
+    ' removed_file="$TMP_REMOVED" "$POLICY_SOURCE" > "$TMP_NORMALIZED"; then
+        rm -f "$TMP_PREPARED" "$TMP_NORMALIZED" \
+            "$TMP_REMOVED" "$PREPARED_POLICY" "$REMOVED_COUNT_FILE"
+        log_error "Policy" "Removal preparation failed" \
+            "policy validation failed user=$REMOVE_USER package=$REMOVE_PACKAGE"
+        return 1
+    fi
+
+    if ! sort -u "$TMP_NORMALIZED" > "$TMP_PREPARED"; then
+        rm -f "$TMP_PREPARED" "$TMP_NORMALIZED" \
+            "$TMP_REMOVED" "$PREPARED_POLICY" "$REMOVED_COUNT_FILE"
+        log_error "Policy" "Removal preparation failed" \
+            "unable to sort prepared policy user=$REMOVE_USER package=$REMOVE_PACKAGE"
+        return 1
+    fi
+
+    if ! mv -f "$TMP_PREPARED" "$PREPARED_POLICY"; then
+        rm -f "$TMP_PREPARED" "$TMP_NORMALIZED" "$TMP_REMOVED"
+        log_error "Policy" "Removal preparation failed" \
+            "unable to finalize prepared policy user=$REMOVE_USER package=$REMOVE_PACKAGE"
+        return 1
+    fi
+
+    if ! mv -f "$TMP_REMOVED" "$REMOVED_COUNT_FILE"; then
+        rm -f "$TMP_NORMALIZED" "$PREPARED_POLICY" "$TMP_REMOVED"
+        log_error "Policy" "Removal preparation failed" \
+            "unable to finalize removal count user=$REMOVE_USER package=$REMOVE_PACKAGE"
+        return 1
+    fi
+
+    rm -f "$TMP_NORMALIZED"
+
+    PREPARED_RULE_COUNT="$(wc -l < "$PREPARED_POLICY" 2>/dev/null)"
+    PREPARED_RULE_COUNT="$(printf "%s" "$PREPARED_RULE_COUNT" | tr -d " ")"
+
+    case "$PREPARED_RULE_COUNT" in
+        ''|*[!0-9]*)
+            rm -f "$PREPARED_POLICY" "$PREPARED_COUNT" "$REMOVED_COUNT_FILE"
+            log_error "Policy" "Removal preparation failed" \
+                "invalid prepared rule count user=$REMOVE_USER package=$REMOVE_PACKAGE"
+            return 1
+            ;;
+    esac
+
+    REMOVED_COUNT="$(cat "$REMOVED_COUNT_FILE" 2>/dev/null)"
+
+    case "$REMOVED_COUNT" in
+        ''|*[!0-9]*)
+            rm -f "$PREPARED_POLICY" "$PREPARED_COUNT" "$REMOVED_COUNT_FILE"
+            log_error "Policy" "Removal preparation failed" \
+                "invalid removal count user=$REMOVE_USER package=$REMOVE_PACKAGE"
+            return 1
+            ;;
+    esac
+
+    printf "%s\n" "$PREPARED_RULE_COUNT" > "$PREPARED_COUNT"
+
+    log_info "Policy" "Removal prepared" \
+        "user=$REMOVE_USER package=$REMOVE_PACKAGE removed=$REMOVED_COUNT remaining=$PREPARED_RULE_COUNT"
+
+    return 0
+}
+
 validate_apps_cache() {
     CACHE="$DATA_DIR/apps.json"
 
@@ -2701,6 +2848,8 @@ apply_policy() {
 
 import_policy_transaction() {
     IMPORT_CONTEXT="${1:-import}"
+    REMOVE_USER="${2:-}"
+    REMOVE_PACKAGE="${3:-}"
 
     case "$IMPORT_CONTEXT" in
         stale)
@@ -2708,6 +2857,9 @@ import_policy_transaction() {
             ;;
         import)
             IMPORT_LABEL="Import"
+            ;;
+        remove)
+            IMPORT_LABEL="App removal"
             ;;
         *)
             IMPORT_LABEL="Import"
@@ -2717,6 +2869,7 @@ import_policy_transaction() {
     CANDIDATE_POLICY="$DATA_DIR/policy.import.$$"
     PREPARED_POLICY="$DATA_DIR/policy.import.prepared.$$"
     PREPARED_COUNT="$DATA_DIR/policy.import.count.$$"
+    REMOVED_COUNT_FILE="$DATA_DIR/policy.remove.count.$$"
 
     TMP_STATE="$DATA_DIR/network.state.import.$$"
     PREPARED_STATE="$DATA_DIR/network.state.import.prepared.$$"
@@ -2735,6 +2888,7 @@ import_policy_transaction() {
     IMPORT_NEW_ACTIVE=0
     IMPORT_ROLLBACK_OK=0
     IMPORT_COMMIT_OK=0
+    IMPORT_REMOVED_COUNT=0
 
     IMPORT_OLD4=""
     IMPORT_OLD6=""
@@ -2749,6 +2903,7 @@ import_policy_transaction() {
             "$CANDIDATE_POLICY" \
             "$PREPARED_POLICY" \
             "$PREPARED_COUNT" \
+            "$REMOVED_COUNT_FILE" \
             "$TMP_STATE" \
             "$PREPARED_STATE" \
             "$TMP_POLICY" \
@@ -2776,17 +2931,19 @@ import_policy_transaction() {
 
     trap 'cleanup_import' EXIT
 
-    if ! cat > "$CANDIDATE_POLICY"; then
-        log_error "Policy" "$IMPORT_LABEL failed" \
-            "unable to read candidate policy"
-        return 1
-    fi
+    if [ "$IMPORT_CONTEXT" != "remove" ]; then
+        if ! cat > "$CANDIDATE_POLICY"; then
+            log_error "Policy" "$IMPORT_LABEL failed" \
+                "unable to read candidate policy"
+            return 1
+        fi
 
-    chmod 600 "$CANDIDATE_POLICY" || {
-        log_error "Policy" "$IMPORT_LABEL failed" \
-            "unable to protect candidate policy"
-        return 1
-    }
+        chmod 600 "$CANDIDATE_POLICY" || {
+            log_error "Policy" "$IMPORT_LABEL failed" \
+                "unable to protect candidate policy"
+            return 1
+        }
+    fi
 
     if ! acquire_policy_lock; then
         log_error "Policy" "$IMPORT_LABEL failed" \
@@ -2848,13 +3005,43 @@ import_policy_transaction() {
         chmod 600 "$BACKUP_STATE" || return 1
     fi
 
-    if ! prepare_policy \
-        "$PREPARED_POLICY" \
-        "$PREPARED_COUNT" \
-        "$CANDIDATE_POLICY"; then
-        log_error "Policy" "$IMPORT_LABEL failed" \
-            "candidate policy preparation failed"
-        return 1
+    if [ "$IMPORT_CONTEXT" = "remove" ]; then
+        if ! prepare_existing_policy_for_removal \
+            "$PREPARED_POLICY" \
+            "$PREPARED_COUNT" \
+            "$POLICY_FILE" \
+            "$REMOVE_USER" \
+            "$REMOVE_PACKAGE" \
+            "$REMOVED_COUNT_FILE"; then
+            log_error "Policy" "$IMPORT_LABEL failed" \
+                "existing policy removal preparation failed"
+            return 1
+        fi
+
+        IMPORT_REMOVED_COUNT="$(cat "$REMOVED_COUNT_FILE" 2>/dev/null)"
+
+        case "$IMPORT_REMOVED_COUNT" in
+            ''|*[!0-9]*)
+                log_error "Policy" "$IMPORT_LABEL failed" \
+                    "invalid removal count user=$REMOVE_USER package=$REMOVE_PACKAGE"
+                return 1
+                ;;
+        esac
+
+        if [ "$IMPORT_REMOVED_COUNT" -eq 0 ]; then
+            log_info "Policy" "App removal" \
+                "user=$REMOVE_USER package=$REMOVE_PACKAGE rules=0 status=NO_RULES"
+            return 0
+        fi
+    else
+        if ! prepare_policy \
+            "$PREPARED_POLICY" \
+            "$PREPARED_COUNT" \
+            "$CANDIDATE_POLICY"; then
+            log_error "Policy" "$IMPORT_LABEL failed" \
+                "candidate policy preparation failed"
+            return 1
+        fi
     fi
 
     if ! build_network_state > "$TMP_STATE"; then
@@ -3116,8 +3303,13 @@ import_policy_transaction() {
     IMPORT_COUNT="$(wc -l < "$PREPARED_POLICY" 2>/dev/null)"
     IMPORT_COUNT="$(printf '%s' "$IMPORT_COUNT" | tr -d ' ')"
 
-    log_info "Policy" "$IMPORT_LABEL committed" \
-        "rules=$IMPORT_COUNT exact replacement"
+    if [ "$IMPORT_CONTEXT" = "remove" ]; then
+        log_info "Policy" "App removal" \
+            "user=$REMOVE_USER package=$REMOVE_PACKAGE rules=$IMPORT_REMOVED_COUNT status=REMOVED"
+    else
+        log_info "Policy" "$IMPORT_LABEL committed" \
+            "rules=$IMPORT_COUNT exact replacement"
+    fi
 
     return 0
 }
@@ -3158,6 +3350,30 @@ fi
 
 if [ "${1:-}" = "--reconcile-stale-policy" ]; then
     import_policy_transaction "stale"
+    exit $?
+fi
+
+if [ "${1:-}" = "--remove-app-policy" ]; then
+    if [ "$#" -ne 3 ]; then
+        printf '%s\n' "Usage: $0 --remove-app-policy USER PACKAGE" >&2
+        exit 2
+    fi
+
+    case "$2" in
+        ''|*[!0-9]*)
+            printf '%s\n' "Invalid user" >&2
+            exit 2
+            ;;
+    esac
+
+    case "$3" in
+        ''|*[!A-Za-z0-9._-]*)
+            printf '%s\n' "Invalid package" >&2
+            exit 2
+            ;;
+    esac
+
+    import_policy_transaction "remove" "$2" "$3"
     exit $?
 fi
 

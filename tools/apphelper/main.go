@@ -13,9 +13,11 @@ import (
 )
 
 const (
-	dataDir = "/data/adb/tirnsecurity"
-	cache   = dataDir + "/apps.json"
-	lockDir = dataDir + "/apps.lock"
+	dataDir       = "/data/adb/tirnsecurity"
+	cache         = dataDir + "/apps.json"
+	identity      = dataDir + "/apps.identity"
+	lockDir       = dataDir + "/apps.lock"
+	refreshSingle = "/data/adb/modules/tirnsecurity/refresh_app_single"
 )
 
 type App struct {
@@ -183,85 +185,95 @@ func loadCache() (Cache, error) {
 	return c, nil
 }
 
-func runPackageRecords(pkg string) ([]App, error) {
-	/*
-		app-common.sh remains the source of truth for:
-		  - APK path discovery
-		  - labels.conf overrides
-		  - APK labels
-		  - package-name fallback
-		  - ignored UID filtering
-		  - system-package detection
-		  - JSON-safe record generation
+func runPackageRecord(user, pkg string) ([]App, error) {
+	cmd := exec.Command("/system/bin/sh", refreshSingle, user, pkg)
 
-		refresh_apps continues to use its optimized bulk AWK implementation.
-	*/
+	out, err := cmd.CombinedOutput()
 
-	script := `
-. /data/adb/tirnsecurity/app-common.sh || exit 1
-
-PACKAGE="$1"
-APK="$(get_apk_path "$PACKAGE")"
-[ -n "$APK" ] || exit 0
-
-USERS="$(mktemp "$DATA_DIR/apphelper.XXXXXX")"
-SYSTEMS="$(mktemp "$DATA_DIR/apphelper.XXXXXX")"
-
-trap 'rm -f "$USERS" "$SYSTEMS"' EXIT
-
-pm list users 2>/dev/null |
-sed -n 's/.*UserInfo{\([0-9][0-9]*\):[^:}]*:.*/\1/p' |
-sort -n -u > "$USERS" || exit 1
-
-while IFS= read -r USER
-do
-	[ -z "$USER" ] && continue
-
-	pm list packages -s --user "$USER" </dev/null 2>/dev/null |
-	sed 's/^package://' > "$SYSTEMS" || exit 1
-
-	pm list packages --user "$USER" -U </dev/null 2>/dev/null |
-	sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\)$/\1|\2/p' |
-	while IFS='|' read -r PKG UID
-	do
-		[ "$PKG" = "$PACKAGE" ] || continue
-		build_app_record "$USER" "$UID" "$PKG" "$SYSTEMS" "$APK"
-	done
-done < "$USERS"
-`
-
-	cmd := exec.Command("/system/bin/sh", "-c", script, "apphelper", pkg)
-
-	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("package scan failed: %s", strings.TrimSpace(string(exitErr.Stderr)))
+			switch exitErr.ExitCode() {
+			case 3:
+				return nil, fmt.Errorf("NOT_INSTALLED")
+			case 4:
+				return nil, fmt.Errorf("CONFLICTING_UID")
+			}
 		}
-		return nil, err
+		detail := strings.TrimSpace(string(out))
+		if detail == "" {
+			return nil, fmt.Errorf("refresh_app_single failed: %w", err)
+		}
+		return nil, fmt.Errorf(
+			"refresh_app_single failed: %w: %s",
+			err,
+			detail,
+		)
 	}
 
-	var records []App
+	var record *App
+	status := ""
+	identityUID := ""
 
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.TrimSpace(line) == "" {
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 
-		var app App
-		if err := json.Unmarshal([]byte(line), &app); err != nil {
-			return nil, fmt.Errorf("invalid generated app record: %w", err)
-		}
+		switch {
+		case strings.HasPrefix(line, "STATUS|"):
+			status = strings.TrimPrefix(line, "STATUS|")
 
-		if app.Pkg != pkg {
-			return nil, fmt.Errorf("generated record has unexpected package %q", app.Pkg)
-		}
+		case strings.HasPrefix(line, "RECORD|"):
+			var app App
+			if err := json.Unmarshal(
+				[]byte(strings.TrimPrefix(line, "RECORD|")),
+				&app,
+			); err != nil {
+				return nil, fmt.Errorf("invalid generated app record: %w", err)
+			}
+			record = &app
 
-		records = append(records, app)
+		case strings.HasPrefix(line, "IDENTITY|"):
+			fields := strings.Split(strings.TrimPrefix(line, "IDENTITY|"), "|")
+			if len(fields) != 3 ||
+				fields[0] != user ||
+				fields[2] != pkg ||
+				!numericRE.MatchString(fields[1]) {
+				return nil, fmt.Errorf("invalid identity response")
+			}
+			identityUID = fields[1]
+		}
 	}
 
-	sortApps(records)
+	switch status {
+	case "OK":
+		if record == nil {
+			return nil, fmt.Errorf("missing RECORD")
+		}
+		if record.User != user || record.Pkg != pkg ||
+			!numericRE.MatchString(record.UID) ||
+			identityUID == "" ||
+			record.UID != identityUID {
+			return nil, fmt.Errorf("record identity mismatch")
+		}
+		return []App{*record}, nil
 
-	return records, nil
+	case "IGNORED_UID":
+		return nil, nil
+
+	case "NOT_INSTALLED":
+		return nil, fmt.Errorf("NOT_INSTALLED")
+
+	case "CONFLICTING_UID":
+		return nil, fmt.Errorf("CONFLICTING_UID")
+
+	default:
+		if status == "" {
+			return nil, fmt.Errorf("missing STATUS")
+		}
+		return nil, fmt.Errorf("refresh_app_single status %s", status)
+	}
 }
 
 func sortApps(apps []App) {
@@ -322,11 +334,11 @@ func writeCache(c Cache) error {
 	return nil
 }
 
-func matchingApps(apps []App, pkg string) []App {
+func matchingApp(apps []App, user, pkg string) []App {
 	var result []App
 
 	for _, app := range apps {
-		if app.Pkg == pkg {
+		if app.User == user && app.Pkg == pkg {
 			result = append(result, app)
 		}
 	}
@@ -355,45 +367,132 @@ func sameApps(a, b []App) bool {
 	return true
 }
 
-func verify(action, pkg string, expected []App) error {
+func verifyCacheApp(user, pkg string, expected []App) error {
 	c, err := loadCache()
 	if err != nil {
 		return fmt.Errorf("verification: %w", err)
 	}
 
-	actual := matchingApps(c.Apps, pkg)
-
-	switch action {
-	case "REMOVED":
-		if len(actual) != 0 {
-			return fmt.Errorf("verification failed: %d record(s) remain for %s", len(actual), pkg)
-		}
-
-	case "ADDED", "REPLACED":
-		if !sameApps(actual, expected) {
-			return fmt.Errorf(
-				"verification failed: expected %d record(s), found %d for %s",
-				len(expected), len(actual), pkg,
-			)
-		}
+	actual := matchingApp(c.Apps, user, pkg)
+	if !sameApps(actual, expected) {
+		return fmt.Errorf(
+			"verification failed for %s|%s: expected %d record(s), found %d",
+			user, pkg, len(expected), len(actual),
+		)
 	}
 
 	return nil
 }
 
+func identityLines(apps []App) ([]string, error) {
+	seen := make(map[string]string, len(apps))
+	lines := make([]string, 0, len(apps))
+
+	for _, app := range apps {
+		if !numericRE.MatchString(app.User) ||
+			!packageRE.MatchString(app.Pkg) ||
+			!numericRE.MatchString(app.UID) {
+			return nil, fmt.Errorf("invalid app identity %s|%s|%s",
+				app.User, app.Pkg, app.UID)
+		}
+
+		key := app.User + "|" + app.Pkg
+		line := key + "|" + app.UID
+
+		if old, ok := seen[key]; ok {
+			if old != line {
+				return nil, fmt.Errorf(
+					"CONFLICTING_UID for %s|%s",
+					app.User, app.Pkg,
+				)
+			}
+			continue
+		}
+
+		seen[key] = line
+		lines = append(lines, line)
+	}
+
+	sort.Slice(lines, func(i, j int) bool {
+		ai := strings.Split(lines[i], "|")
+		aj := strings.Split(lines[j], "|")
+
+		aiUser := ai[0]
+		ajUser := aj[0]
+
+		if aiUser != ajUser {
+			// User IDs have already been validated as decimal strings.
+			if len(aiUser) != len(ajUser) {
+				return len(aiUser) < len(ajUser)
+			}
+			return aiUser < ajUser
+		}
+		if ai[1] != aj[1] {
+			return ai[1] < aj[1]
+		}
+		return ai[2] < aj[2]
+	})
+
+	return lines, nil
+}
+
+func writeIdentity(apps []App) error {
+	lines, err := identityLines(apps)
+	if err != nil {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(dataDir, "apps.identity.apphelper.*")
+	if err != nil {
+		return err
+	}
+
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if len(lines) > 0 {
+		if _, err := tmp.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+			tmp.Close()
+			return err
+		}
+	}
+
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Chmod(tmpPath, 0644); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, identity)
+}
+
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintf(os.Stderr, "Usage: %s {ADDED|REMOVED|REPLACED} package\n", os.Args[0])
+	if len(os.Args) != 4 {
+		fmt.Fprintf(os.Stderr,
+			"Usage: %s {ADDED|REMOVED|REPLACED} user package\n",
+			os.Args[0])
 		os.Exit(1)
 	}
 
 	action := strings.ToUpper(os.Args[1])
-	pkg := os.Args[2]
+	user := os.Args[2]
+	pkg := os.Args[3]
 
 	switch action {
 	case "ADDED", "REMOVED", "REPLACED":
 	default:
 		fail("INVALID_ACTION")
+	}
+
+	if !numericRE.MatchString(user) {
+		fail("INVALID_USER")
 	}
 
 	if !packageRE.MatchString(pkg) {
@@ -414,16 +513,14 @@ func main() {
 		fail("CACHE_ERROR: %v", err)
 	}
 
+	old := matchingApp(cacheData.Apps, user, pkg)
+
 	var expected []App
 
 	if action != "REMOVED" {
-		expected, err = runPackageRecords(pkg)
+		expected, err = runPackageRecord(user, pkg)
 		if err != nil {
-			fail("PACKAGE_SCAN_FAILED: %v", err)
-		}
-
-		if len(expected) == 0 {
-			fail("PACKAGE_NOT_FOUND")
+			fail("APP_REFRESH_FAILED: %v", err)
 		}
 	}
 
@@ -431,8 +528,8 @@ func main() {
 	inserted := false
 
 	for _, app := range cacheData.Apps {
-		if app.Pkg == pkg {
-			if !inserted && action != "REMOVED" {
+		if app.User == user && app.Pkg == pkg {
+			if !inserted && len(expected) > 0 {
 				updated = append(updated, expected...)
 				inserted = true
 			}
@@ -442,19 +539,45 @@ func main() {
 		updated = append(updated, app)
 	}
 
-	if !inserted && action != "REMOVED" {
+	if !inserted && len(expected) > 0 {
 		updated = append(updated, expected...)
 	}
 
+	sortApps(updated)
+
 	cacheData.Apps = updated
+
+	newApps := matchingApp(cacheData.Apps, user, pkg)
+
+	if sameApps(old, newApps) {
+		fmt.Printf("UNCHANGED|%s|%s|%s\n", action, user, pkg)
+		return
+	}
 
 	if err := writeCache(cacheData); err != nil {
 		fail("CACHE_WRITE_FAILED: %v", err)
 	}
 
-	if err := verify(action, pkg, expected); err != nil {
+	if err := verifyCacheApp(user, pkg, newApps); err != nil {
 		fail("%v", err)
 	}
 
-	fmt.Printf("OK|%s|%s|%d\n", action, pkg, len(expected))
+	if err := writeIdentity(cacheData.Apps); err != nil {
+		fail("IDENTITY_WRITE_FAILED: %v", err)
+	}
+
+	switch {
+	case len(old) == 0 && len(newApps) > 0:
+		fmt.Printf("ADDED|%s|%s\n", user, pkg)
+
+	case len(old) > 0 && len(newApps) == 0:
+		fmt.Printf("REMOVED|%s|%s\n", user, pkg)
+
+	case len(old) > 0 && len(newApps) > 0 &&
+		!sameApps(old, newApps):
+		fmt.Printf("UPDATED|%s|%s\n", user, pkg)
+
+	default:
+		fmt.Printf("UNCHANGED|%s|%s|%s\n", action, user, pkg)
+	}
 }

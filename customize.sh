@@ -48,7 +48,7 @@ log_msg "========================================="
 
 
 
-chmod 755 "$MODDIR/action.sh" "$MODDIR/apphelper" "$MODDIR/appaudit" "$MODDIR/app-watch.sh" "$MODDIR/app-queue.sh" "$MODDIR/apklabel" "$MODDIR/customize.sh" "$MODDIR/policy-watch.sh" "$MODDIR/policy-watch.sh-handler" "$MODDIR/post-fs-data.sh" "$MODDIR/refresh_apps" "$MODDIR/service.sh" "$MODDIR/uninstall.sh" "$MODDIR/verify.sh" "$MODDIR/webserver.sh" "$MODDIR/webserver-start.sh"
+chmod 755 "$MODDIR/action.sh" "$MODDIR/apphelper" "$MODDIR/appaudit" "$MODDIR/app-watch.sh" "$MODDIR/app-queue.sh" "$MODDIR/apklabel" "$MODDIR/customize.sh" "$MODDIR/policy-watch.sh" "$MODDIR/policy-watch.sh-handler" "$MODDIR/post-fs-data.sh" "$MODDIR/refresh_apps" "$MODDIR/refresh_app_single" "$MODDIR/service.sh" "$MODDIR/uninstall.sh" "$MODDIR/verify.sh" "$MODDIR/webserver.sh" "$MODDIR/webserver-start.sh"
 chmod 644 "$MODDIR/webroot/ui"
 chmod 755 "$MODDIR/webroot/cgi-bin/apps" "$MODDIR/webroot/cgi-bin/apps-refresh-progress" "$MODDIR/webroot/cgi-bin/apps-revision" "$MODDIR/webroot/cgi-bin/clear" "$MODDIR/webroot/cgi-bin/logs" "$MODDIR/webroot/cgi-bin/logs-clear" "$MODDIR/webroot/cgi-bin/policy" "$MODDIR/webroot/cgi-bin/policy_refresh" "$MODDIR/webroot/cgi-bin/policy-import" "$MODDIR/webroot/cgi-bin/policy-import-commit" "$MODDIR/webroot/cgi-bin/policy-stale-commit" "$MODDIR/webroot/cgi-bin/policy-stale-scan" "$MODDIR/webroot/cgi-bin/refresh" "$MODDIR/webroot/cgi-bin/refresh-apps" "$MODDIR/webroot/cgi-bin/status"
 

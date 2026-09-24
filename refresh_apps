@@ -20,6 +20,9 @@ APK_LABEL_META="$DATA_DIR/apk-label-meta.$$"
 APK_LABEL_RESULTS="$DATA_DIR/apk-label-results.$$"
 APK_UNIQUE="$DATA_DIR/apk-unique.$$"
 ELIGIBLE_PKGS="$DATA_DIR/eligible-pkgs.$$"
+IDENTITY_TMP="$DATA_DIR/apps.identity.$$"
+IDENTITY_RAW="$DATA_DIR/apps.identity.raw.$$"
+IDENTITY="$DATA_DIR/apps.identity"
 PROGRESS="$DATA_DIR/apps-refresh-progress"
 PROGRESS_TMP="$PROGRESS.$$"
 PROGRESS_ACTIVE=0
@@ -122,7 +125,7 @@ if ! acquire_apps_lock; then
     exit 2
 fi
 
-trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; if [ "$TIRN_REFRESH_SOURCE" = "UI" ]; then REFRESH_DURATION=$(( $(date +%s) - REFRESH_START )); if [ "$STATUS" -eq 0 ]; then log_info "Apps" "Cache manually refreshed" "UI refresh duration=${REFRESH_DURATION}s"; else log_error "Apps" "Cache refresh failed" "UI refresh duration=${REFRESH_DURATION}s status=ERROR"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_LABEL_META" "$APK_LABEL_RESULTS" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$PROGRESS_TMP" "$APK_LABEL_STORE_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; if [ "$TIRN_REFRESH_SOURCE" = "UI" ]; then REFRESH_DURATION=$(( $(date +%s) - REFRESH_START )); if [ "$STATUS" -eq 0 ]; then log_info "Apps" "Cache manually refreshed" "UI refresh duration=${REFRESH_DURATION}s"; else log_error "Apps" "Cache refresh failed" "UI refresh duration=${REFRESH_DURATION}s status=ERROR"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_LABEL_META" "$APK_LABEL_RESULTS" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$IDENTITY_TMP" "$IDENTITY_RAW" "$PROGRESS_TMP" "$APK_LABEL_STORE_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
 
 
 "$PM" list users 2>/dev/null |
@@ -354,6 +357,8 @@ mv -f "$APK_LABEL_STORE_TMP" "$APK_LABEL_STORE" || exit 1
     }
 ' "$APK_PATHS" "$APK_LABEL_CACHE" "$ELIGIBLE_PKGS" > "$APK_LABELS"
 
+: > "$IDENTITY_RAW" || exit 1
+
 for user in $(/system/bin/cut -d'|' -f1 "$USERS")
 do
     [ -z "$user" ] && continue
@@ -379,6 +384,9 @@ do
             }
             close(ARGV[4])
             delete ARGV[4]
+
+            identity_file = ARGV[5]
+            delete ARGV[5]
 
             first = 1
         }
@@ -437,10 +445,11 @@ do
                 printf ","
 
             printf "{\"user\":\"%s\",\"uid\":\"%s\",\"pkg\":\"%s\",\"name\":\"%s\",\"system\":%s}", appuser, uid, pkg, name, is_system
+            printf "%s|%s|%s\n", appuser, pkg, uid >> identity_file
 
             first = 0
         }
-    ' "$SYSTEMS" "$PKGS" "$LABELS" "$APK_LABELS" > "$OUT"
+    ' "$SYSTEMS" "$PKGS" "$LABELS" "$APK_LABELS" "$IDENTITY_RAW" > "$OUT"
 
     if [ -s "$OUT" ]; then
         if [ "$first" -eq 0 ]; then
@@ -454,8 +463,24 @@ done
 
 printf ']}\n' >> "$TMP"
 
+/system/bin/awk -F'|' '
+    NF != 3 ||
+    $1 == "" || $2 == "" || $3 == "" ||
+    $1 !~ /^[0-9]+$/ ||
+    $2 !~ /^[A-Za-z0-9._]+$/ ||
+    $3 !~ /^[0-9]+$/ {
+        exit 1
+    }
+' "$IDENTITY_RAW" || exit 1
+
+/system/bin/sort -t'|' -k1,1n -k2,2 -k3,3n -u \
+    "$IDENTITY_RAW" > "$IDENTITY_TMP" || exit 1
+
 mv -f "$TMP" "$CACHE" || exit 1
 
 chmod 644 "$CACHE"
+
+chmod 644 "$IDENTITY_TMP" || exit 1
+mv -f "$IDENTITY_TMP" "$IDENTITY" || exit 1
 
 echo "Apps cache refreshed"
