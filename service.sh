@@ -204,6 +204,477 @@ generation_lan_chain() {
     printf 'TIRNFW-G%s-L\n' "$1"
 }
 
+network_dispatcher_chain() {
+    GEN="$1"
+    case "$GEN" in
+        TIRNFW-NET-G*) printf '%s\n' "$GEN" ;;
+        *) printf 'TIRNFW-NET-G%s\n' "$GEN" ;;
+    esac
+}
+
+policy_mobile_pointer_chain() {
+    printf '%s\n' 'TIRNFW-POLICY-M'
+}
+
+policy_wifi_pointer_chain() {
+    printf '%s\n' 'TIRNFW-POLICY-W'
+}
+
+policy_lan_pointer_chain() {
+    printf '%s\n' 'TIRNFW-POLICY-L'
+}
+
+policy_mobile_chain() {
+    GEN="$1"
+    printf 'TIRNFW-G%s-M\n' "$GEN"
+}
+
+policy_wifi_chain() {
+    GEN="$1"
+    printf 'TIRNFW-G%s-W\n' "$GEN"
+}
+
+policy_lan_chain() {
+    GEN="$1"
+    printf 'TIRNFW-G%s-L\n' "$GEN"
+}
+
+network_dispatcher_chain_exists() {
+    IPT="$1"
+    CHAIN="$2"
+    chain_exists "$IPT" "$CHAIN"
+}
+
+network_generation_create_family() {
+    GEN="$1"
+    FAMILY="$2"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    DISP="$(network_dispatcher_chain "$GEN")"
+
+    network_dispatcher_chain_exists "$IPT" "$DISP" && return 1
+
+    "$IPT" -w 5 -N "$DISP" || return 1
+
+    return 0
+}
+
+network_generation_delete_family() {
+    GEN="$1"
+    FAMILY="$2"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    DISP="$(network_dispatcher_chain "$GEN")"
+
+    if ! network_dispatcher_chain_exists "$IPT" "$DISP"; then
+        return 0
+    fi
+
+    "$IPT" -w 5 -F "$DISP" || return 1
+    "$IPT" -w 5 -X "$DISP" || return 1
+
+    return 0
+}
+
+network_generation_cleanup_new() {
+    GEN="$1"
+    CLEANUP_FAILED=0
+
+    if ! network_generation_delete_family "$GEN" ipv4 >/dev/null 2>&1; then
+        log_warn "Firewall" "New IPv4 network generation cleanup failed" \
+            "generation=$GEN"
+        CLEANUP_FAILED=1
+    fi
+
+    if ! network_generation_delete_family "$GEN" ipv6 >/dev/null 2>&1; then
+        log_warn "Firewall" "New IPv6 network generation cleanup failed" \
+            "generation=$GEN"
+        CLEANUP_FAILED=1
+    fi
+
+    return "$CLEANUP_FAILED"
+}
+
+network_generation_populate_family() {
+    GEN="$1"
+    FAMILY="$2"
+    NETWORK_STATE="$3"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    DISP="$(network_dispatcher_chain "$GEN")"
+
+    MOB="$(policy_mobile_pointer_chain)"
+    WIFI="$(policy_wifi_pointer_chain)"
+    LAN="$(policy_lan_pointer_chain)"
+
+    network_dispatcher_chain_exists "$IPT" "$DISP" || return 1
+
+    policy_pointer_chain_exists "$IPT" "$MOB" || return 1
+    policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
+    policy_pointer_chain_exists "$IPT" "$LAN" || return 1
+
+    while IFS='|' read -r TYPE VALUE EXTRA; do
+        case "$TYPE" in
+            MOBILE)
+                [ -n "$VALUE" ] || continue
+
+                "$IPT" -w 5 -A "$DISP" \
+                    -o "$VALUE" -j "$MOB" || return 1
+                ;;
+
+            WLAN4)
+                [ "$FAMILY" = "ipv4" ] || continue
+                [ -n "$VALUE" ] || continue
+
+                "$IPT" -w 5 -A "$DISP" \
+                    -d "$VALUE" -o wlan0 -j "$LAN" || return 1
+
+                "$IPT" -w 5 -A "$DISP" \
+                    -d "$VALUE" -o wlan0 -j RETURN || return 1
+                ;;
+
+            WLAN6)
+                [ "$FAMILY" = "ipv6" ] || continue
+                [ -n "$VALUE" ] || continue
+
+                "$IPT" -w 5 -A "$DISP" \
+                    -d "$VALUE" -o wlan0 -j "$LAN" || return 1
+
+                "$IPT" -w 5 -A "$DISP" \
+                    -d "$VALUE" -o wlan0 -j RETURN || return 1
+                ;;
+        esac
+    done < "$NETWORK_STATE"
+
+    if [ "$FAMILY" = "ipv4" ]; then
+        if grep -q '^WLAN4|' "$NETWORK_STATE"; then
+            "$IPT" -w 5 -A "$DISP" \
+                -o wlan0 -j "$WIFI" || return 1
+        fi
+    else
+        if grep -q '^WLAN6|' "$NETWORK_STATE"; then
+            "$IPT" -w 5 -A "$DISP" \
+                -o wlan0 -j "$WIFI" || return 1
+        fi
+    fi
+
+    while IFS='|' read -r TYPE VPN_IFACE UNDERLYING_IFACE; do
+        [ "$TYPE" = "VPN" ] || continue
+        [ -n "$VPN_IFACE" ] || continue
+        [ -n "$UNDERLYING_IFACE" ] || continue
+
+        case "$UNDERLYING_IFACE" in
+            wlan*)
+                if [ "$FAMILY" = "ipv4" ]; then
+                    if ! grep -q '^WLAN4|' "$NETWORK_STATE"; then
+                        log_error "Firewall" "Unsupported VPN topology" \
+                            "family=ipv4 vpn=$VPN_IFACE underlying=$UNDERLYING_IFACE missing=WLAN4"
+                        return 1
+                    fi
+
+                    while IFS='|' read -r WLAN_TYPE WLAN_VALUE EXTRA; do
+                        [ "$WLAN_TYPE" = "WLAN4" ] || continue
+                        [ -n "$WLAN_VALUE" ] || continue
+
+                        "$IPT" -w 5 -A "$DISP" \
+                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j "$LAN" || return 1
+
+                        "$IPT" -w 5 -A "$DISP" \
+                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j RETURN || return 1
+                    done < "$NETWORK_STATE"
+
+                    "$IPT" -w 5 -A "$DISP" \
+                        -o "$VPN_IFACE" -j "$WIFI" || return 1
+                else
+                    if ! grep -q '^WLAN6|' "$NETWORK_STATE"; then
+                        log_error "Firewall" "Unsupported VPN topology" \
+                            "family=ipv6 vpn=$VPN_IFACE underlying=$UNDERLYING_IFACE missing=WLAN6"
+                        return 1
+                    fi
+
+                    while IFS='|' read -r WLAN_TYPE WLAN_VALUE EXTRA; do
+                        [ "$WLAN_TYPE" = "WLAN6" ] || continue
+                        [ -n "$WLAN_VALUE" ] || continue
+
+                        "$IPT" -w 5 -A "$DISP" \
+                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j "$LAN" || return 1
+
+                        "$IPT" -w 5 -A "$DISP" \
+                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j RETURN || return 1
+                    done < "$NETWORK_STATE"
+
+                    "$IPT" -w 5 -A "$DISP" \
+                        -o "$VPN_IFACE" -j "$WIFI" || return 1
+                fi
+                ;;
+
+            rmnet*)
+                "$IPT" -w 5 -A "$DISP" \
+                    -o "$VPN_IFACE" -j "$MOB" || return 1
+                ;;
+
+            *)
+                log_error "Firewall" "Unsupported VPN topology" \
+                    "family=$FAMILY vpn=$VPN_IFACE underlying=$UNDERLYING_IFACE"
+                return 1
+                ;;
+        esac
+    done < "$NETWORK_STATE"
+
+    "$IPT" -w 5 -A "$DISP" -j RETURN || return 1
+
+    return 0
+}
+
+network_generation_verify_family() {
+    GEN="$1"
+    FAMILY="$2"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    DISP="$(network_dispatcher_chain "$GEN")"
+
+    MOB="$(policy_mobile_pointer_chain)"
+    WIFI="$(policy_wifi_pointer_chain)"
+    LAN="$(policy_lan_pointer_chain)"
+
+    network_dispatcher_chain_exists "$IPT" "$DISP" || return 1
+    policy_pointer_chain_exists "$IPT" "$MOB" || return 1
+    policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
+    policy_pointer_chain_exists "$IPT" "$LAN" || return 1
+
+    RULES="$("$IPT" -w 5 -S "$DISP" 2>/dev/null)" || return 1
+
+    RETURN_COUNT=0
+    LAST_RULE=""
+
+    while IFS= read -r RULE; do
+        [ -n "$RULE" ] || continue
+
+        case "$RULE" in
+            "-N $DISP")
+                continue
+                ;;
+            "-A $DISP -o "*"-j $MOB")
+                ;;
+            "-A $DISP -o "*"-j $WIFI")
+                ;;
+            "-A $DISP -o "*"-j $LAN")
+                ;;
+            "-A $DISP -d "*"-o "*"-j $LAN")
+                ;;
+            "-A $DISP -d "*"-o "*"-j RETURN")
+                ;;
+            "-A $DISP -o "*"-d "*"-j RETURN")
+                ;;
+            "-A $DISP -j $WIFI")
+                ;;
+            "-A $DISP -j $MOB")
+                ;;
+            "-A $DISP -j RETURN")
+                RETURN_COUNT=$((RETURN_COUNT + 1))
+                ;;
+            "")
+                ;;
+            *)
+                debug_log "Firewall" "network dispatcher unexpected rule" \
+                    "family=$FAMILY rule=$RULE"
+                return 1
+                ;;
+        esac
+
+        [ -n "$RULE" ] && LAST_RULE="$RULE"
+    done <<EOF
+$RULES
+EOF
+
+    [ "$RETURN_COUNT" -eq 1 ] || return 1
+    [ "$LAST_RULE" = "-A $DISP -j RETURN" ] || return 1
+
+    return 0
+}
+
+network_generation_verify_complete() {
+    GEN="$1"
+
+    network_generation_verify_family "$GEN" ipv4 || return 1
+    network_generation_verify_family "$GEN" ipv6 || return 1
+
+    return 0
+}
+
+policy_pointer_chain_exists() {
+    IPT="$1"
+    CHAIN="$2"
+    chain_exists "$IPT" "$CHAIN"
+}
+
+policy_pointer_create_family() {
+    FAMILY="$1"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_pointer_chain)"
+    WIFI="$(policy_wifi_pointer_chain)"
+    LAN="$(policy_lan_pointer_chain)"
+
+    if policy_pointer_chain_exists "$IPT" "$MOB" ||
+       policy_pointer_chain_exists "$IPT" "$WIFI" ||
+       policy_pointer_chain_exists "$IPT" "$LAN"; then
+        return 1
+    fi
+
+    "$IPT" -w 5 -N "$MOB" || return 1
+
+    if ! "$IPT" -w 5 -N "$WIFI"; then
+        "$IPT" -w 5 -X "$MOB" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if ! "$IPT" -w 5 -N "$LAN"; then
+        "$IPT" -w 5 -X "$WIFI" >/dev/null 2>&1 || true
+        "$IPT" -w 5 -X "$MOB" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    return 0
+}
+
+policy_pointer_delete_family() {
+    FAMILY="$1"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_pointer_chain)"
+    WIFI="$(policy_wifi_pointer_chain)"
+    LAN="$(policy_lan_pointer_chain)"
+
+    for CHAIN in "$MOB" "$WIFI" "$LAN"; do
+        if policy_pointer_chain_exists "$IPT" "$CHAIN"; then
+            "$IPT" -w 5 -F "$CHAIN" || return 1
+            "$IPT" -w 5 -X "$CHAIN" || return 1
+        fi
+    done
+
+    return 0
+}
+
+policy_pointer_verify_family() {
+    FAMILY="$1"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_pointer_chain)"
+    WIFI="$(policy_wifi_pointer_chain)"
+    LAN="$(policy_lan_pointer_chain)"
+
+    for CHAIN in "$MOB" "$WIFI" "$LAN"; do
+        policy_pointer_chain_exists "$IPT" "$CHAIN" || return 1
+
+        case "$CHAIN" in
+            "$MOB") SUFFIX="M" ;;
+            "$WIFI") SUFFIX="W" ;;
+            "$LAN") SUFFIX="L" ;;
+            *) return 1 ;;
+        esac
+
+        RULES="$("$IPT" -w 5 -S "$CHAIN" 2>/dev/null)" || return 1
+
+        TARGET=""
+        RETURN_COUNT=0
+        OTHER_COUNT=0
+
+        while IFS= read -r RULE; do
+            [ -n "$RULE" ] || continue
+
+            case "$RULE" in
+                "-N $CHAIN")
+                    continue
+                    ;;
+                "-A $CHAIN -j TIRNFW-G"[0-9]*"-$SUFFIX")
+                    if [ -n "$TARGET" ]; then
+                        OTHER_COUNT=$((OTHER_COUNT + 1))
+                    else
+                        TARGET="${RULE#-A $CHAIN -j }"
+                    fi
+                    ;;
+                "-A $CHAIN -j RETURN")
+                    RETURN_COUNT=$((RETURN_COUNT + 1))
+                    ;;
+                *)
+                    OTHER_COUNT=$((OTHER_COUNT + 1))
+                    ;;
+            esac
+        done <<EOF
+$RULES
+EOF
+
+        [ "$OTHER_COUNT" -eq 0 ] || return 1
+        [ "$RETURN_COUNT" -eq 1 ] || return 1
+        [ -n "$TARGET" ] || return 1
+
+        case "$TARGET" in
+            TIRNFW-G*-"$SUFFIX")
+                TARGET_GEN="${TARGET#TIRNFW-G}"
+                TARGET_GEN="${TARGET_GEN%-${SUFFIX}}"
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+
+        case "$TARGET_GEN" in
+            ''|*[!0-9]*)
+                return 1
+                ;;
+        esac
+
+        POINTER_CHAIN="$CHAIN"
+        TARGET_CHAIN="TIRNFW-G${TARGET_GEN}-${SUFFIX}"
+        policy_pointer_chain_exists "$IPT" "$TARGET_CHAIN" || return 1
+
+        FIRST_RULE="$(printf '%s\n' "$RULES" | sed -n '2p')"
+        SECOND_RULE="$(printf '%s\n' "$RULES" | sed -n '3p')"
+
+        [ "$FIRST_RULE" = "-A $POINTER_CHAIN -j $TARGET" ] || return 1
+        [ "$SECOND_RULE" = "-A $POINTER_CHAIN -j RETURN" ] || return 1
+    done
+
+    return 0
+}
+
+
 generation_create_family() {
     GEN="$1"
     FAMILY="$2"
@@ -648,6 +1119,104 @@ generation_remove_active_ipv4() {
 generation_remove_active_ipv6() {
     GEN="$1"
     "$IP6TABLES" -w 5 -D "$MAIN_CHAIN" -j "$GEN"
+}
+
+network_active_generation() {
+    FAMILY="$1"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    RULES="$("$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
+
+    TARGETS=""
+    COUNT=0
+
+    while IFS= read -r RULE; do
+        [ -n "$RULE" ] || continue
+
+        case "$RULE" in
+            "-A $MAIN_CHAIN -j TIRNFW-NET-G"[0-9]*)
+                TARGET="${RULE#-A $MAIN_CHAIN -j }"
+                TARGET_GEN="${TARGET#TIRNFW-NET-G}"
+
+                case "$TARGET_GEN" in
+                    ''|*[!0-9]*)
+                        return 1
+                        ;;
+                esac
+
+                COUNT=$((COUNT + 1))
+                TARGETS="${TARGETS}${TARGET}
+"
+                ;;
+        esac
+    done <<EOF
+$RULES
+EOF
+
+    [ "$COUNT" -eq 1 ] || return 1
+
+    TARGET="$(printf '%s' "$TARGETS" | sed -n '1p')"
+    TARGET_GEN="${TARGET#TIRNFW-NET-G}"
+
+    network_dispatcher_chain_exists "$IPT" "$TARGET" || return 1
+
+    printf '%s
+' "$TARGET_GEN"
+}
+
+network_active_generation_complete() {
+    OLD4="$(network_active_generation ipv4)" || return 1
+    OLD6="$(network_active_generation ipv6)" || return 1
+
+    [ "$OLD4" = "$OLD6" ] || return 1
+
+    printf '%s
+' "$OLD4"
+}
+
+network_generation_active_rule_ipv4() {
+    GEN="$1"
+    DISP="$(network_dispatcher_chain "$GEN")"
+    "$IPTABLES" -w 5 -C "$MAIN_CHAIN" -j "$DISP" >/dev/null 2>&1
+}
+
+network_generation_active_rule_ipv6() {
+    GEN="$1"
+    DISP="$(network_dispatcher_chain "$GEN")"
+    "$IP6TABLES" -w 5 -C "$MAIN_CHAIN" -j "$DISP" >/dev/null 2>&1
+}
+
+network_generation_install_active_ipv4() {
+    GEN="$1"
+    DISP="$(network_dispatcher_chain "$GEN")"
+
+    network_dispatcher_chain_exists "$IPTABLES" "$DISP" || return 1
+    "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$DISP"
+}
+
+network_generation_install_active_ipv6() {
+    GEN="$1"
+    DISP="$(network_dispatcher_chain "$GEN")"
+
+    network_dispatcher_chain_exists "$IP6TABLES" "$DISP" || return 1
+    "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$DISP"
+}
+
+network_generation_remove_active_ipv4() {
+    GEN="$1"
+    DISP="$(network_dispatcher_chain "$GEN")"
+    "$IPTABLES" -w 5 -D "$MAIN_CHAIN" -j "$DISP"
+}
+
+network_generation_remove_active_ipv6() {
+    GEN="$1"
+    DISP="$(network_dispatcher_chain "$GEN")"
+    "$IP6TABLES" -w 5 -D "$MAIN_CHAIN" -j "$DISP"
 }
 
 chain_exists() {
@@ -1971,6 +2540,209 @@ generation_populate_family() {
     return 0
 }
 
+next_split_generation_id() {
+    MAX_GENERATION=0
+
+    for IPT in "$IPTABLES" "$IP6TABLES"; do
+        for CHAIN in $(
+            "$IPT" -w 5 -S 2>/dev/null |
+            sed -n \
+                -e 's/^-N TIRNFW-G\([0-9][0-9]*\)$/\1/p' \
+                -e 's/^-N TIRNFW-G\([0-9][0-9]*\)-[MWL]$/\1/p' \
+                -e 's/^-N TIRNFW-NET-G\([0-9][0-9]*\)$/\1/p'
+        ); do
+            case "$CHAIN" in
+                ''|*[!0-9]*) ;;
+                *)
+                    if [ "$CHAIN" -gt "$MAX_GENERATION" ] 2>/dev/null; then
+                        MAX_GENERATION="$CHAIN"
+                    fi
+                    ;;
+            esac
+        done
+    done
+
+    printf '%s\n' "$((MAX_GENERATION + 1))"
+}
+
+policy_generation_create_family() {
+    GEN="$1"
+    FAMILY="$2"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_chain "$GEN")"
+    WIFI="$(policy_wifi_chain "$GEN")"
+    LAN="$(policy_lan_chain "$GEN")"
+
+    generation_chain_exists "$IPT" "$MOB" && return 1
+    generation_chain_exists "$IPT" "$WIFI" && return 1
+    generation_chain_exists "$IPT" "$LAN" && return 1
+
+    "$IPT" -w 5 -N "$MOB" || return 1
+
+    if ! "$IPT" -w 5 -N "$WIFI"; then
+        "$IPT" -w 5 -X "$MOB" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if ! "$IPT" -w 5 -N "$LAN"; then
+        "$IPT" -w 5 -X "$WIFI" >/dev/null 2>&1 || true
+        "$IPT" -w 5 -X "$MOB" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    return 0
+}
+
+policy_generation_delete_family() {
+    GEN="$1"
+    FAMILY="$2"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_chain "$GEN")"
+    WIFI="$(policy_wifi_chain "$GEN")"
+    LAN="$(policy_lan_chain "$GEN")"
+
+    for CHAIN in "$MOB" "$WIFI" "$LAN"; do
+        if generation_chain_exists "$IPT" "$CHAIN"; then
+            "$IPT" -w 5 -F "$CHAIN" || return 1
+            "$IPT" -w 5 -X "$CHAIN" || return 1
+        fi
+    done
+
+    return 0
+}
+
+policy_generation_cleanup_new() {
+    GEN="$1"
+    CLEANUP_FAILED=0
+
+    if ! policy_generation_delete_family "$GEN" ipv4 >/dev/null 2>&1; then
+        log_warn "Firewall" "New IPv4 policy generation cleanup failed" \
+            "generation=$GEN"
+        CLEANUP_FAILED=1
+    fi
+
+    if ! policy_generation_delete_family "$GEN" ipv6 >/dev/null 2>&1; then
+        log_warn "Firewall" "New IPv6 policy generation cleanup failed" \
+            "generation=$GEN"
+        CLEANUP_FAILED=1
+    fi
+
+    return "$CLEANUP_FAILED"
+}
+
+policy_generation_populate_family() {
+    GEN="$1"
+    FAMILY="$2"
+    PREPARED_POLICY="$3"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_chain "$GEN")"
+    WIFI="$(policy_wifi_chain "$GEN")"
+    LAN="$(policy_lan_chain "$GEN")"
+
+    "$IPT" -w 5 -A "$MOB" -j RETURN || return 1
+    "$IPT" -w 5 -A "$WIFI" -j RETURN || return 1
+    "$IPT" -w 5 -A "$LAN" -j RETURN || return 1
+
+    while IFS='|' read -r USER PACKAGE UID NETWORK ACTION; do
+        case "$NETWORK" in
+            MOBILE) TARGET="$MOB" ;;
+            WIFI) TARGET="$WIFI" ;;
+            LAN) TARGET="$LAN" ;;
+            *) return 1 ;;
+        esac
+
+        case "$ACTION" in
+            BLOCK)
+                "$IPT" -w 5 -I "$TARGET" 1 \
+                    -m owner --uid-owner "$UID" -j DROP || return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done < "$PREPARED_POLICY"
+
+    return 0
+}
+
+policy_generation_verify_family() {
+    GEN="$1"
+    FAMILY="$2"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_chain "$GEN")"
+    WIFI="$(policy_wifi_chain "$GEN")"
+    LAN="$(policy_lan_chain "$GEN")"
+
+    for CHAIN in "$MOB" "$WIFI" "$LAN"; do
+        generation_chain_exists "$IPT" "$CHAIN" || return 1
+
+        RULES="$("$IPT" -w 5 -S "$CHAIN" 2>/dev/null)" || return 1
+
+        RETURN_COUNT=0
+        LAST_RULE=""
+
+        while IFS= read -r RULE; do
+            [ -n "$RULE" ] || continue
+
+            case "$RULE" in
+                "-N $CHAIN")
+                    continue
+                    ;;
+                "-A $CHAIN -m owner --uid-owner "[0-9]*" -j DROP")
+                    ;;
+                "-A $CHAIN -j RETURN")
+                    RETURN_COUNT=$((RETURN_COUNT + 1))
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+
+            LAST_RULE="$RULE"
+        done <<EOF
+$RULES
+EOF
+
+        [ "$RETURN_COUNT" -eq 1 ] || return 1
+        [ "$LAST_RULE" = "-A $CHAIN -j RETURN" ] || return 1
+    done
+
+    return 0
+}
+
+policy_generation_verify_complete() {
+    GEN="$1"
+
+    policy_generation_verify_family "$GEN" ipv4 || return 1
+    policy_generation_verify_family "$GEN" ipv6 || return 1
+
+    return 0
+}
+
 generation_verify_complete() {
     GEN="$1"
 
@@ -2519,6 +3291,493 @@ generation_transaction_cleanup_new() {
     fi
 
     return "$CLEANUP_FAILED"
+}
+
+
+policy_pointer_active_generation() {
+    FAMILY="$1"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_pointer_chain)"
+    WIFI="$(policy_wifi_pointer_chain)"
+    LAN="$(policy_lan_pointer_chain)"
+
+    policy_pointer_chain_exists "$IPT" "$MOB" || return 1
+    policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
+    policy_pointer_chain_exists "$IPT" "$LAN" || return 1
+
+    RULES_M="$("$IPT" -w 5 -S "$MOB" 2>/dev/null)" || return 1
+    RULES_W="$("$IPT" -w 5 -S "$WIFI" 2>/dev/null)" || return 1
+    RULES_L="$("$IPT" -w 5 -S "$LAN" 2>/dev/null)" || return 1
+
+    TARGET_M="$(printf '%s\n' "$RULES_M" |
+        sed -n 's/^-A TIRNFW-POLICY-M -j \(TIRNFW-G[0-9][0-9]*-M\)$/\1/p')"
+    TARGET_W="$(printf '%s\n' "$RULES_W" |
+        sed -n 's/^-A TIRNFW-POLICY-W -j \(TIRNFW-G[0-9][0-9]*-W\)$/\1/p')"
+    TARGET_L="$(printf '%s\n' "$RULES_L" |
+        sed -n 's/^-A TIRNFW-POLICY-L -j \(TIRNFW-G[0-9][0-9]*-L\)$/\1/p')"
+
+    [ -n "$TARGET_M" ] || return 1
+    [ -n "$TARGET_W" ] || return 1
+    [ -n "$TARGET_L" ] || return 1
+
+    GEN_M="${TARGET_M#TIRNFW-G}"
+    GEN_M="${GEN_M%-M}"
+
+    GEN_W="${TARGET_W#TIRNFW-G}"
+    GEN_W="${GEN_W%-W}"
+
+    GEN_L="${TARGET_L#TIRNFW-G}"
+    GEN_L="${GEN_L%-L}"
+
+    case "$GEN_M" in ''|*[!0-9]*) return 1 ;; esac
+    case "$GEN_W" in ''|*[!0-9]*) return 1 ;; esac
+    case "$GEN_L" in ''|*[!0-9]*) return 1 ;; esac
+
+    [ "$GEN_M" = "$GEN_W" ] || return 1
+    [ "$GEN_M" = "$GEN_L" ] || return 1
+
+    policy_pointer_verify_family "$FAMILY" || return 1
+
+    printf '%s\n' "$GEN_M"
+}
+
+policy_pointer_activate_family() {
+    FAMILY="$1"
+    GEN="$2"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    case "$GEN" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    MOB="$(policy_mobile_pointer_chain)"
+    WIFI="$(policy_wifi_pointer_chain)"
+    LAN="$(policy_lan_pointer_chain)"
+
+    TARGET_M="$(policy_mobile_chain "$GEN")"
+    TARGET_W="$(policy_wifi_chain "$GEN")"
+    TARGET_L="$(policy_lan_chain "$GEN")"
+
+    generation_chain_exists "$IPT" "$TARGET_M" || return 1
+    generation_chain_exists "$IPT" "$TARGET_W" || return 1
+    generation_chain_exists "$IPT" "$TARGET_L" || return 1
+
+    policy_pointer_chain_exists "$IPT" "$MOB" || return 1
+    policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
+    policy_pointer_chain_exists "$IPT" "$LAN" || return 1
+
+    "$IPT" -w 5 -F "$MOB" || return 1
+    "$IPT" -w 5 -F "$WIFI" || return 1
+    "$IPT" -w 5 -F "$LAN" || return 1
+
+    "$IPT" -w 5 -A "$MOB" -j "$TARGET_M" || return 1
+    "$IPT" -w 5 -A "$MOB" -j RETURN || return 1
+
+    "$IPT" -w 5 -A "$WIFI" -j "$TARGET_W" || return 1
+    "$IPT" -w 5 -A "$WIFI" -j RETURN || return 1
+
+    "$IPT" -w 5 -A "$LAN" -j "$TARGET_L" || return 1
+    "$IPT" -w 5 -A "$LAN" -j RETURN || return 1
+
+    policy_pointer_verify_family "$FAMILY"
+}
+
+policy_pointer_restore_family() {
+    FAMILY="$1"
+    GEN="$2"
+
+    [ -n "$GEN" ] || return 1
+    policy_pointer_activate_family "$FAMILY" "$GEN"
+}
+
+policy_pointer_verify_complete() {
+    policy_pointer_verify_family ipv4 || return 1
+    policy_pointer_verify_family ipv6 || return 1
+    return 0
+}
+
+policy_pointer_active_generation_complete() {
+    OLD4="$(policy_pointer_active_generation ipv4)" || return 1
+    OLD6="$(policy_pointer_active_generation ipv6)" || return 1
+
+    [ "$OLD4" = "$OLD6" ] || return 1
+
+    printf '%s\n' "$OLD4"
+}
+
+policy_generation_transaction() {
+    PREPARED_POLICY="$1"
+
+    [ -f "$PREPARED_POLICY" ] || return 1
+
+    policy_pointer_verify_complete || {
+        log_error "Firewall" \
+            "Policy pointer family invalid before transaction" ""
+        return 1
+    }
+
+    OLD_GEN="$(policy_pointer_active_generation_complete)" || {
+        log_error "Firewall" \
+            "Active policy generation discovery failed" ""
+        return 1
+    }
+
+    NEW_GEN="$(next_split_generation_id)" || return 1
+
+    log_info "Firewall" "Policy generation build started" \
+        "generation=$NEW_GEN old=$OLD_GEN"
+
+    policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+
+    if ! policy_generation_create_family "$NEW_GEN" ipv4 ||
+       ! policy_generation_create_family "$NEW_GEN" ipv6 ||
+       ! policy_generation_populate_family "$NEW_GEN" ipv4 "$PREPARED_POLICY" ||
+       ! policy_generation_populate_family "$NEW_GEN" ipv6 "$PREPARED_POLICY" ||
+       ! policy_generation_verify_complete "$NEW_GEN"; then
+
+        log_error "Firewall" "Policy generation build failed" \
+            "generation=$NEW_GEN"
+
+        policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    log_info "Firewall" "Policy generation verified off-path" \
+        "generation=$NEW_GEN"
+
+    if ! generation_guard_install ||
+       ! generation_guard_verify; then
+        log_error "Firewall" \
+            "Policy transaction guard installation failed" \
+            "generation=$NEW_GEN"
+
+        if generation_guard_verify; then
+            log_warn "Firewall" "Fail-closed guard retained" \
+                "generation=$NEW_GEN"
+        else
+            policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+        fi
+
+        return 1
+    fi
+
+    POINTERS_SWITCHED=0
+
+    if policy_pointer_activate_family ipv4 "$NEW_GEN" &&
+       policy_pointer_activate_family ipv6 "$NEW_GEN" &&
+       policy_pointer_verify_complete; then
+        POINTERS_SWITCHED=1
+    fi
+
+    if [ "$POINTERS_SWITCHED" -ne 1 ]; then
+        log_error "Firewall" \
+            "Policy pointer activation failed; beginning rollback" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        ROLLBACK_OK=1
+
+        policy_pointer_restore_family ipv4 "$OLD_GEN" || ROLLBACK_OK=0
+        policy_pointer_restore_family ipv6 "$OLD_GEN" || ROLLBACK_OK=0
+        policy_pointer_verify_complete || ROLLBACK_OK=0
+
+        if [ "$ROLLBACK_OK" -ne 1 ]; then
+            log_error "Firewall" \
+                "Policy pointer rollback verification failed" \
+                "generation=$NEW_GEN old=$OLD_GEN"
+            return 1
+        fi
+
+        if ! generation_guard_remove; then
+            log_error "Firewall" \
+                "Guard removal after policy rollback failed" \
+                "generation=$NEW_GEN"
+            return 1
+        fi
+
+        policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+
+        log_warn "Firewall" "Policy generation rollback verified" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        return 1
+    fi
+
+    if ! policy_generation_verify_complete "$NEW_GEN"; then
+        log_error "Firewall" \
+            "New policy generation verification failed after activation" \
+            "generation=$NEW_GEN"
+        return 1
+    fi
+
+    if ! policy_generation_delete_family "$OLD_GEN" ipv4 ||
+       ! policy_generation_delete_family "$OLD_GEN" ipv6; then
+        log_error "Firewall" \
+            "Old policy generation cleanup failed" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+        return 1
+    fi
+
+    if ! policy_pointer_verify_complete ||
+       ! policy_generation_verify_complete "$NEW_GEN"; then
+        log_error "Firewall" \
+            "Post-cleanup policy verification failed" \
+            "generation=$NEW_GEN"
+        return 1
+    fi
+
+    if ! generation_guard_remove; then
+        log_error "Firewall" \
+            "Policy transaction guard removal failed" \
+            "generation=$NEW_GEN"
+
+        if generation_guard_verify; then
+            log_warn "Firewall" "Fail-closed guard retained" \
+                "generation=$NEW_GEN"
+        fi
+
+        return 1
+    fi
+
+    if ! policy_pointer_verify_complete ||
+       ! policy_generation_verify_complete "$NEW_GEN"; then
+        log_error "Firewall" \
+            "Final policy transaction verification failed" \
+            "generation=$NEW_GEN"
+        return 1
+    fi
+
+    log_info "Firewall" "Policy generation activated" \
+        "generation=$NEW_GEN old=$OLD_GEN"
+
+    return 0
+}
+
+network_generation_transaction() {
+    NETWORK_STATE="$1"
+
+    [ -f "$NETWORK_STATE" ] || return 1
+
+    policy_pointer_verify_complete || {
+        log_error "Firewall" \
+            "Policy pointer family invalid before network transaction" ""
+        return 1
+    }
+
+    OLD_GEN="$(network_active_generation_complete)" || {
+        log_error "Firewall" \
+            "Active network generation discovery failed" ""
+        return 1
+    }
+
+    NEW_GEN="$(next_split_generation_id)" || return 1
+
+    log_info "Firewall" "Network generation build started" \
+        "generation=$NEW_GEN old=$OLD_GEN"
+
+    network_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+
+    if ! network_generation_create_family "$NEW_GEN" ipv4 ||
+       ! network_generation_create_family "$NEW_GEN" ipv6 ||
+       ! network_generation_populate_family "$NEW_GEN" ipv4 "$NETWORK_STATE" ||
+       ! network_generation_populate_family "$NEW_GEN" ipv6 "$NETWORK_STATE" ||
+       ! network_generation_verify_complete "$NEW_GEN"; then
+
+        log_error "Firewall" "Network generation build failed" \
+            "generation=$NEW_GEN"
+
+        network_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    log_info "Firewall" "Network generation verified off-path" \
+        "generation=$NEW_GEN"
+
+    if ! generation_guard_install ||
+       ! generation_guard_verify; then
+
+        log_error "Firewall" \
+            "Network transaction guard installation failed" \
+            "generation=$NEW_GEN"
+
+        if generation_guard_verify; then
+            log_warn "Firewall" "Fail-closed guard retained" \
+                "generation=$NEW_GEN"
+        else
+            network_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+        fi
+
+        return 1
+    fi
+
+    NETWORK_SWITCHED=0
+
+    if network_generation_install_active_ipv4 "$NEW_GEN" &&
+       network_generation_install_active_ipv6 "$NEW_GEN" &&
+       network_generation_active_rule_ipv4 "$NEW_GEN" &&
+       network_generation_active_rule_ipv6 "$NEW_GEN"; then
+        NETWORK_SWITCHED=1
+    fi
+
+    if [ "$NETWORK_SWITCHED" -ne 1 ]; then
+        log_error "Firewall" \
+            "Network generation activation failed; beginning rollback" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        ROLLBACK_OK=1
+
+        network_generation_remove_active_ipv4 "$NEW_GEN" >/dev/null 2>&1 || true
+        network_generation_remove_active_ipv6 "$NEW_GEN" >/dev/null 2>&1 || true
+
+        network_generation_active_rule_ipv4 "$NEW_GEN" && ROLLBACK_OK=0
+        network_generation_active_rule_ipv6 "$NEW_GEN" && ROLLBACK_OK=0
+
+        if ! network_generation_active_rule_ipv4 "$OLD_GEN"; then
+            network_generation_install_active_ipv4 "$OLD_GEN" || ROLLBACK_OK=0
+        fi
+
+        if ! network_generation_active_rule_ipv6 "$OLD_GEN"; then
+            network_generation_install_active_ipv6 "$OLD_GEN" || ROLLBACK_OK=0
+        fi
+
+        network_generation_active_rule_ipv4 "$OLD_GEN" || ROLLBACK_OK=0
+        network_generation_active_rule_ipv6 "$OLD_GEN" || ROLLBACK_OK=0
+
+        if [ "$ROLLBACK_OK" -ne 1 ]; then
+            log_error "Firewall" \
+                "Network generation rollback verification failed" \
+                "generation=$NEW_GEN old=$OLD_GEN"
+            return 1
+        fi
+
+        if ! generation_guard_remove; then
+            log_error "Firewall" \
+                "Guard removal after network rollback failed" \
+                "generation=$NEW_GEN"
+            return 1
+        fi
+
+        network_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+
+        log_warn "Firewall" "Network generation rollback verified" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        return 1
+    fi
+
+    if ! network_generation_verify_complete "$NEW_GEN" ||
+       ! network_generation_active_rule_ipv4 "$NEW_GEN" ||
+       ! network_generation_active_rule_ipv6 "$NEW_GEN"; then
+
+        log_error "Firewall" \
+            "New network generation verification failed after activation" \
+            "generation=$NEW_GEN"
+        return 1
+    fi
+
+    if ! network_generation_remove_active_ipv4 "$OLD_GEN"; then
+
+        log_error "Firewall" \
+            "Old IPv4 network generation removal failed" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        network_generation_install_active_ipv4 "$NEW_GEN" || true
+        network_generation_install_active_ipv6 "$NEW_GEN" || true
+
+        if network_generation_active_rule_ipv4 "$OLD_GEN" &&
+           network_generation_active_rule_ipv6 "$OLD_GEN"; then
+
+            log_warn "Firewall" \
+                "Old generation restored after old IPv4 cleanup failure" \
+                "generation=$NEW_GEN old=$OLD_GEN"
+        else
+
+            log_error "Firewall" \
+                "Old generation recovery failed after old IPv4 cleanup failure" \
+                "generation=$NEW_GEN old=$OLD_GEN"
+        fi
+
+        return 1
+    fi
+
+    if ! network_generation_remove_active_ipv6 "$OLD_GEN"; then
+
+        log_error "Firewall" \
+            "Old IPv6 network generation removal failed" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        network_generation_install_active_ipv4 "$OLD_GEN" || true
+        network_generation_install_active_ipv6 "$OLD_GEN" || true
+
+        return 1
+    fi
+
+    if network_generation_active_rule_ipv4 "$OLD_GEN" ||
+       network_generation_active_rule_ipv6 "$OLD_GEN"; then
+
+        log_error "Firewall" \
+            "Old network generation remains active after removal" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+        return 1
+    fi
+
+    if ! network_generation_delete_family "$OLD_GEN" ipv4 ||
+       ! network_generation_delete_family "$OLD_GEN" ipv6; then
+
+        log_error "Firewall"             "Old network generation cleanup failed"             "generation=$NEW_GEN old=$OLD_GEN"
+
+        return 1
+    fi
+
+    if ! network_generation_verify_complete "$NEW_GEN" ||
+       ! network_generation_active_rule_ipv4 "$NEW_GEN" ||
+       ! network_generation_active_rule_ipv6 "$NEW_GEN" ||
+       [ "$(network_active_generation_complete)" != "$NEW_GEN" ]; then
+
+        log_error "Firewall" \
+            "Post-switch network verification failed" \
+            "generation=$NEW_GEN"
+        return 1
+    fi
+
+    if ! generation_guard_remove; then
+        log_error "Firewall" \
+            "Network transaction guard removal failed" \
+            "generation=$NEW_GEN"
+
+        if generation_guard_verify; then
+            log_warn "Firewall" "Fail-closed guard retained" \
+                "generation=$NEW_GEN"
+        fi
+
+        return 1
+    fi
+
+    if ! network_generation_verify_complete "$NEW_GEN" ||
+       ! network_generation_active_rule_ipv4 "$NEW_GEN" ||
+       ! network_generation_active_rule_ipv6 "$NEW_GEN" ||
+       [ "$(network_active_generation_complete)" != "$NEW_GEN" ]; then
+
+        log_error "Firewall" \
+            "Final network transaction verification failed" \
+            "generation=$NEW_GEN"
+        return 1
+    fi
+
+    log_info "Firewall" "Network generation activated" \
+        "generation=$NEW_GEN old=$OLD_GEN"
+
+    return 0
 }
 
 generation_switch_transaction() {
