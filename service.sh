@@ -26,6 +26,7 @@ WIFI_CHAIN="TIRNFW-WIFI"
 LAN_CHAIN="TIRNFW-LAN"
 
 POLL_INTERVAL=30
+POST_BOOT_REFRESH_DELAY=30
 
 umask 077
 
@@ -1024,6 +1025,113 @@ prepare_policy() {
     log_info "Policy" "Prepared" "rules=$PREPARED_RULE_COUNT"
     return 0
 }
+prepare_applied_policy_for_boot() {
+    PREPARED_POLICY="$1"
+    PREPARED_COUNT="$2"
+    POLICY_SOURCE="$POLICY_STATE_FILE"
+
+    TMP_PREPARED="$PREPARED_POLICY.tmp.$$"
+    TMP_NORMALIZED="$PREPARED_POLICY.normalized.$$"
+
+    rm -f "$TMP_PREPARED" "$TMP_NORMALIZED"
+
+    if [ ! -f "$POLICY_SOURCE" ]; then
+        log_error "Policy" "Boot policy preparation failed" \
+            "policy.applied missing"
+        return 1
+    fi
+
+    if ! awk -F'|' '
+        {
+            line_no++
+
+            if ($0 ~ /^[[:space:]]*#/)
+                next
+
+            if ($0 ~ /^[[:space:]]*$/)
+                next
+
+            if (NF != 5) {
+                error = "invalid field count on line " line_no
+                exit 2
+            }
+
+            user = $1
+            pkg = $2
+            uid = $3
+            network = $4
+            action = $5
+
+            if (user !~ /^[0-9]+$/ || user > 2147483647) {
+                error = "invalid user on line " line_no
+                exit 2
+            }
+
+            if (pkg !~ /^[A-Za-z0-9._-]+$/) {
+                error = "invalid package on line " line_no
+                exit 2
+            }
+
+            if (uid !~ /^[0-9]+$/ || uid < 1 || uid > 2147483647) {
+                error = "invalid UID on line " line_no
+                exit 2
+            }
+
+            if (network != "MOBILE" &&
+                network != "WIFI" &&
+                network != "LAN") {
+                error = "invalid network on line " line_no
+                exit 2
+            }
+
+            if (action != "BLOCK") {
+                error = "invalid action on line " line_no
+                exit 2
+            }
+
+            print user "|" pkg "|" uid "|" network "|" action
+        }
+
+        END {
+            if (error != "") {
+                print error > "/dev/stderr"
+                exit 2
+            }
+        }
+    ' "$POLICY_SOURCE" > "$TMP_NORMALIZED"; then
+        rm -f "$TMP_PREPARED" "$TMP_NORMALIZED"
+        log_error "Policy" "Boot policy preparation failed" \
+            "policy.applied validation failed"
+        return 1
+    fi
+
+    if ! sort -u "$TMP_NORMALIZED" > "$TMP_PREPARED"; then
+        rm -f "$TMP_PREPARED" "$TMP_NORMALIZED"
+        log_error "Policy" "Boot policy preparation failed" \
+            "unable to sort policy.applied"
+        return 1
+    fi
+
+    rm -f "$TMP_NORMALIZED"
+
+    if ! mv -f "$TMP_PREPARED" "$PREPARED_POLICY"; then
+        rm -f "$TMP_PREPARED" "$PREPARED_POLICY"
+        log_error "Policy" "Boot policy preparation failed" \
+            "unable to finalize prepared policy"
+        return 1
+    fi
+
+    PREPARED_RULE_COUNT="$(wc -l < "$PREPARED_POLICY" 2>/dev/null)"
+    PREPARED_RULE_COUNT="$(printf "%s" "$PREPARED_RULE_COUNT" | tr -d " ")"
+
+    printf "%s\n" "$PREPARED_RULE_COUNT" > "$PREPARED_COUNT"
+
+    log_info "Policy" "Boot policy prepared" \
+        "rules=$PREPARED_RULE_COUNT source=policy.applied"
+
+    return 0
+}
+
 prepare_existing_policy_for_removal() {
     PREPARED_POLICY="$1"
     PREPARED_COUNT="$2"
@@ -1248,7 +1356,9 @@ refresh_apps_verified()
     ATTEMPT=1
     MAX_ATTEMPTS=2
 
-    if [ "$MODE" = "bootstrap" ] || [ "$MODE" = "post-bootstrap" ]; then
+    if [ "$MODE" = "post-bootstrap" ]; then
+        sleep "$POST_BOOT_REFRESH_DELAY"
+    elif [ "$MODE" = "bootstrap" ]; then
         sleep 10
     fi
 
@@ -1388,10 +1498,10 @@ bootstrap_existing_install() {
         return 1
     fi
 
-    if ! prepare_policy "$PREPARED_POLICY" "$PREPARED_COUNT"; then
+    if ! prepare_applied_policy_for_boot "$PREPARED_POLICY" "$PREPARED_COUNT"; then
         rm -f "$TMP_STATE" "$PREPARED_POLICY" "$PREPARED_COUNT"
         release_firewall_lock
-        log_error "Firewall" "Existing install bootstrap failed"             "policy preparation failed"
+        log_error "Firewall" "Existing install bootstrap failed"             "last-known-good policy unavailable"
         return 1
     fi
 
