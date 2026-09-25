@@ -4751,6 +4751,121 @@ if [ "${1:-}" = "--policy-event" ]; then
     exit $?
 fi
 
+policy_has_app_rule() {
+    CHECK_USER="$1"
+    CHECK_PACKAGE="$2"
+
+    awk -F'|' -v user="$CHECK_USER" -v package="$CHECK_PACKAGE" '
+        $1 == user && $2 == package {
+            found = 1
+            exit
+        }
+        END {
+            exit(found ? 0 : 1)
+        }
+    ' "$POLICY_FILE" 2>/dev/null
+}
+
+process_app_events() {
+    APP_EVENT_DIR="$DATA_DIR/app-events"
+
+    [ -d "$APP_EVENT_DIR" ] || return 0
+
+    for EVENT_FILE in "$APP_EVENT_DIR"/*
+    do
+        [ -f "$EVENT_FILE" ] || continue
+
+        EVENT_WORK="$APP_EVENT_DIR/.work.$$"
+
+        if ! mv -f "$EVENT_FILE" "$EVENT_WORK" 2>/dev/null; then
+            continue
+        fi
+
+        EVENT_DATA="$(cat "$EVENT_WORK" 2>/dev/null)"
+        ACTION="$(printf '%s\n' "$EVENT_DATA" | awk -F'|' 'NR==1 {print $1}')"
+        USER="$(printf '%s\n' "$EVENT_DATA" | awk -F'|' 'NR==1 {print $2}')"
+        PACKAGE="$(printf '%s\n' "$EVENT_DATA" | awk -F'|' 'NR==1 {print $3}')"
+
+        case "$ACTION" in
+            ADDED|UPDATED|REMOVED)
+                ;;
+            *)
+                rm -f "$EVENT_WORK"
+                continue
+                ;;
+        esac
+
+        case "$USER" in
+            ''|*[!0-9]*)
+                rm -f "$EVENT_WORK"
+                continue
+                ;;
+        esac
+
+        case "$PACKAGE" in
+            ''|*[!A-Za-z0-9._-]*)
+                rm -f "$EVENT_WORK"
+                continue
+                ;;
+        esac
+
+        log_info "App Event" "Received" \
+            "action=$ACTION user=$USER package=$PACKAGE"
+
+        case "$ACTION" in
+            ADDED|UPDATED)
+                if ! policy_has_app_rule "$USER" "$PACKAGE"; then
+                    log_info "App Event" "No policy transaction required" \
+                        "action=$ACTION user=$USER package=$PACKAGE status=NO_RULES"
+                    rm -f "$EVENT_WORK"
+                    continue
+                fi
+
+                if apply_policy; then
+                    log_info "App Event" "Policy transaction completed" \
+                        "action=$ACTION user=$USER package=$PACKAGE"
+                else
+                    log_error "App Event" "Policy transaction failed" \
+                        "action=$ACTION user=$USER package=$PACKAGE"
+
+                    if [ ! -e "$EVENT_FILE" ]; then
+                        mv -f "$EVENT_WORK" "$EVENT_FILE" 2>/dev/null || {
+                            log_error "App Event" "Event recovery failed" \
+                                "action=$ACTION user=$USER package=$PACKAGE"
+                            rm -f "$EVENT_WORK"
+                        }
+                    else
+                        rm -f "$EVENT_WORK"
+                    fi
+                    continue
+                fi
+                ;;
+            REMOVED)
+                if import_policy_transaction "remove" "$USER" "$PACKAGE"; then
+                    log_info "App Event" "Policy removal transaction completed" \
+                        "action=$ACTION user=$USER package=$PACKAGE"
+                else
+                    log_error "App Event" "Policy removal transaction failed" \
+                        "action=$ACTION user=$USER package=$PACKAGE"
+
+                    if [ ! -e "$EVENT_FILE" ]; then
+                        mv -f "$EVENT_WORK" "$EVENT_FILE" 2>/dev/null || {
+                            log_error "App Event" "Event recovery failed" \
+                                "action=$ACTION user=$USER package=$PACKAGE"
+                            rm -f "$EVENT_WORK"
+                        }
+                    else
+                        rm -f "$EVENT_WORK"
+                    fi
+                    continue
+                fi
+                ;;
+        esac
+
+        rm -f "$EVENT_WORK"
+    done
+}
+
 log_info "Service" "Started" "module initialization"
 
 clear_stale_boot_locks
@@ -4773,5 +4888,6 @@ trap 'kill "$POLICY_WATCH_PID" "$APP_WATCH_PID" 2>/dev/null || true' EXIT INT TE
 
 while true; do
     sleep "$POLL_INTERVAL"
+    process_app_events
     apply_dispatcher
 done

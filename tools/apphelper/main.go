@@ -367,6 +367,28 @@ func sameApps(a, b []App) bool {
 	return true
 }
 
+func sameAppIdentity(a, b []App) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	aa := append([]App(nil), a...)
+	bb := append([]App(nil), b...)
+
+	sortApps(aa)
+	sortApps(bb)
+
+	for i := range aa {
+		if aa[i].User != bb[i].User ||
+			aa[i].Pkg != bb[i].Pkg ||
+			aa[i].UID != bb[i].UID {
+			return false
+		}
+	}
+
+	return true
+}
+
 func verifyCacheApp(user, pkg string, expected []App) error {
 	c, err := loadCache()
 	if err != nil {
@@ -574,7 +596,7 @@ func main() {
 		fmt.Printf("REMOVED|%s|%s\n", user, pkg)
 
 	case len(old) > 0 && len(newApps) > 0 &&
-		!sameApps(old, newApps):
+		!sameAppIdentity(old, newApps):
 		fmt.Printf("UPDATED|%s|%s\n", user, pkg)
 
 	default:

@@ -22,6 +22,7 @@ LOG="$DATA_DIR/service.log"
 DEBUG_LOG="$DATA_DIR/debug.log"
 LOCK="$DATA_DIR/app-watch.lock"
 EVENT_DIR="$DATA_DIR/app-watch-events"
+APP_EVENT_QUEUE="$DATA_DIR/app-events"
 
 DEBOUNCE=2
 
@@ -40,6 +41,15 @@ if ! "$MKDIR" "$EVENT_DIR" 2>/dev/null; then
 fi
 
 chmod 700 "$EVENT_DIR"
+
+if ! "$MKDIR" "$APP_EVENT_QUEUE" 2>/dev/null; then
+    if [ ! -d "$APP_EVENT_QUEUE" ]; then
+        log_error "App Watcher" "Startup failed" "unable to create app event directory"
+        exit 1
+    fi
+fi
+
+chmod 700 "$APP_EVENT_QUEUE"
 
 if ! mkdir "$LOCK" 2>/dev/null; then
     log_warn "App Watcher" "Already running" "lock=$LOCK"
@@ -174,6 +184,28 @@ resolve_removed_users() {
         "$SORT" -nu
 }
 
+write_app_event() {
+    ACTION="$1"
+    USER="$2"
+    PACKAGE="$3"
+
+    EVENT_TMP="$APP_EVENT_QUEUE/.event.$$"
+    EVENT_FILE="$APP_EVENT_QUEUE/${USER}_${PACKAGE}"
+
+    printf '%s|%s|%s\n' \
+        "$ACTION" "$USER" "$PACKAGE" > "$EVENT_TMP" || {
+            "$RM" -f "$EVENT_TMP"
+            return 1
+        }
+
+    "$MV" -f "$EVENT_TMP" "$EVENT_FILE" || {
+        "$RM" -f "$EVENT_TMP"
+        return 1
+    }
+
+    return 0
+}
+
 process_profile() {
     ACTION="$1"
     USER="$2"
@@ -201,28 +233,25 @@ process_profile() {
         log_info "Package" "Processed" \
             "action=$ACTION user=$USER package=$PACKAGE status=${RESULT_LINE:-OK}"
 
-        if [ "$ACTION" = "REMOVED" ]; then
-            case "$RESULT_LINE" in
-                REMOVED\|*)
-                    if "$SH" "$SERVICE" --remove-app-policy "$USER" "$PACKAGE" >/dev/null 2>&1; then
-                        log_info "Policy" "Removal requested" \
-                            "user=$USER package=$PACKAGE status=TRANSACTION_OK"
-                    else
-                        log_error "Policy" "Removal failed" \
-                            "user=$USER package=$PACKAGE status=TRANSACTION_FAILED"
-                        return 1
-                    fi
-                    ;;
-                UNCHANGED\|*)
-                    log_info "Policy" "Removal skipped" \
-                        "user=$USER package=$PACKAGE rules=UNKNOWN status=APP_CACHE_UNCHANGED"
-                    ;;
-                *)
-                    log_warn "Policy" "Removal skipped" \
-                        "user=$USER package=$PACKAGE status=UNEXPECTED_APPHELPER_RESULT"
-                    ;;
-            esac
-        fi
+        EVENT_ACTION="${RESULT_LINE%%|*}"
+
+        case "$EVENT_ACTION" in
+            ADDED|UPDATED|REMOVED)
+                if ! write_app_event "$EVENT_ACTION" "$USER" "$PACKAGE"; then
+                    log_error "Package" "Event dispatch failed" \
+                        "action=$ACTION event_action=$EVENT_ACTION user=$USER package=$PACKAGE"
+                    return 1
+                fi
+                ;;
+            UNCHANGED)
+                log_info "Package" "No policy event required" \
+                    "action=$ACTION event_action=$EVENT_ACTION user=$USER package=$PACKAGE status=UNCHANGED"
+                ;;
+            *)
+                log_warn "Package" "Policy event skipped" \
+                    "action=$ACTION event_action=${EVENT_ACTION:-UNKNOWN} user=$USER package=$PACKAGE status=UNEXPECTED_APPHELPER_RESULT"
+                ;;
+        esac
 
         return 0
     fi
@@ -350,12 +379,21 @@ process_event_file() {
     RETRY_FILE="$EVENT_DIR/.retry.$$"
 
     : > "$RETRY_FILE" || {
-        "$RM" -f "$RETRY_FILE" "$WORK_FILE"
+        "$RM" -f "$RETRY_FILE"
+        "$MV" -f "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
+            log_error "Package" "Event recovery failed" \
+                "action=$ACTION package=$PACKAGE status=RETRY_FILE_CREATE"
+        }
         return 1
     }
 
     printf '%s\n' "$USERS" > "$USERS_FILE" || {
-        "$RM" -f "$USERS_FILE" "$RETRY_FILE" "$WORK_FILE"
+        "$RM" -f "$USERS_FILE"
+        "$RM" -f "$RETRY_FILE"
+        "$MV" -f "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
+            log_error "Package" "Event recovery failed" \
+                "action=$ACTION package=$PACKAGE status=USERS_FILE_CREATE"
+        }
         return 1
     }
 
@@ -396,7 +434,11 @@ process_event_file() {
 
         case "$RETRY_USERS" in
             ''|*[!0-9,]*)
-                "$RM" -f "$RETRY_FILE" "$WORK_FILE"
+                "$RM" -f "$RETRY_FILE"
+                "$MV" -f "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
+                    log_error "Package" "Event recovery failed" \
+                        "action=$ACTION package=$PACKAGE status=RETRY_STATE"
+                }
                 log_error "Package" "Retry state creation failed" \
                     "action=$ACTION package=$PACKAGE users=$RETRY_USERS"
                 return 1
@@ -406,15 +448,35 @@ process_event_file() {
         RETRY_TMP="$EVENT_DIR/.retry-event.$$"
 
         printf '%s|%s|%s\n' \
-            "$RETRY_ACTION" "$RETRY_TIME" "$RETRY_USERS" > "$RETRY_TMP" || {
-            "$RM" -f "$RETRY_TMP" "$RETRY_FILE" "$WORK_FILE"
+            "$RETRY_ACTION" \
+            "$RETRY_TIME" \
+            "$RETRY_USERS" > "$RETRY_TMP" || {
+            "$RM" -f "$RETRY_TMP" "$RETRY_FILE"
+            "$MV" -n "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
+                log_error "Package" "Event recovery failed" \
+                    "action=$ACTION package=$PACKAGE status=RETRY_EVENT_CREATE"
+            }
             return 1
         }
 
-        "$MV" -f "$RETRY_TMP" "$EVENT_FILE" || {
-            "$RM" -f "$RETRY_TMP" "$RETRY_FILE" "$WORK_FILE"
+        "$MV" -n "$RETRY_TMP" "$EVENT_FILE" 2>/dev/null
+        RETRY_INSTALL_STATUS=$?
+
+        if [ -e "$EVENT_FILE" ]; then
+            "$RM" -f "$RETRY_TMP"
+        elif [ "$RETRY_INSTALL_STATUS" -ne 0 ]; then
+            "$RM" -f "$RETRY_TMP" "$RETRY_FILE"
+            "$MV" -n "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
+                log_error "Package" "Event recovery failed" \
+                    "action=$ACTION package=$PACKAGE status=RETRY_EVENT_INSTALL"
+            }
             return 1
-        }
+        else
+            "$RM" -f "$RETRY_TMP" "$RETRY_FILE"
+            log_error "Package" "Event recovery failed" \
+                "action=$ACTION package=$PACKAGE status=RETRY_EVENT_MISSING"
+            return 1
+        fi
 
         log_warn "Package" "Processing deferred" \
             "action=$ACTION package=$PACKAGE retry=1 users=$RETRY_USERS"
