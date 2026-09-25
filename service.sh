@@ -4163,6 +4163,15 @@ apply_policy() {
         return 1
     fi
 
+    if [ -f "$POLICY_STATE_FILE" ] &&
+       cmp -s "$PREPARED_POLICY" "$POLICY_STATE_FILE"; then
+        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT" "$TMP_STATE"
+        release_firewall_lock
+        log_info "Policy" "No change" \
+            "prepared policy matches policy.applied; firewall generation retained"
+        return 0
+    fi
+
     if ! build_network_state > "$TMP_STATE"; then
         rm -f "$PREPARED_POLICY" "$PREPARED_COUNT" "$TMP_STATE"
         release_firewall_lock
