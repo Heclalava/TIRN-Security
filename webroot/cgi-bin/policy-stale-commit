@@ -14,7 +14,7 @@ BODY_FILE="$DATA_DIR/policy-stale-body.$$"
     exit 1
 }
 
-CONTENT_LENGTH="${CONTENT_LENGTH:-}"
+CONTENT_LENGTH="${CONTENT_LENGTH:-0}"
 
 case "$CONTENT_LENGTH" in
     ""|*[!0-9]*)
@@ -23,10 +23,6 @@ case "$CONTENT_LENGTH" in
         ;;
 esac
 
-if [ "$CONTENT_LENGTH" -le 0 ]; then
-    printf '{"status":"ERROR","error":"Empty request body"}\n'
-    exit 1
-fi
 
 if [ "$CONTENT_LENGTH" -gt 1048576 ]; then
     printf '{"status":"ERROR","error":"Request too large"}\n'
@@ -41,11 +37,6 @@ if ! cat > "$BODY_FILE"; then
     exit 1
 fi
 
-if [ ! -s "$BODY_FILE" ]; then
-    rm -f "$BODY_FILE"
-    printf '{"status":"ERROR","error":"Empty request body"}\n'
-    exit 1
-fi
 
 if [ -f "$DATA_DIR/test.env" ]; then
     . "$DATA_DIR/test.env"

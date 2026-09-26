@@ -288,7 +288,7 @@ button{color:inherit}
   margin:0;
   border:1px solid var(--line);
   border-top:0;
-  border-radius:0 0 10px 10px;
+  border-radius:0;
   background:var(--panel);
   overflow:hidden;
   flex:1;
@@ -297,8 +297,77 @@ button{color:inherit}
   flex-direction:column;
   box-shadow:
     inset 1px 1px 2px rgba(255,255,255,.035),
-    inset -1px -1px 3px rgba(0,0,0,.45),
+    inset -1px 0 3px rgba(0,0,0,.45),
     0 3px 8px rgba(0,0,0,.45);
+}
+
+.pending-bar{
+  position:relative;
+  z-index:2;
+  flex:none;
+  min-height:36px;
+  margin:0;
+  padding:5px 7px;
+  border:1px solid var(--line);
+  border-top:1px solid rgba(0,0,0,.45);
+  border-radius:0 0 10px 10px;
+  background:#282927;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  box-shadow:
+    inset 1px 1px 2px rgba(255,255,255,.035),
+    inset -1px 0 2px rgba(0,0,0,.35),
+    0 3px 8px rgba(0,0,0,.45);
+}
+
+.pending-bar span,
+.pending-bar button{
+  position:relative;
+  z-index:1;
+}
+
+.pending-bar span{
+  min-width:0;
+  color:var(--muted);
+  font-size:11px;
+  line-height:1.15;
+}
+
+.pending-bar button{
+  flex:none;
+  min-width:94px;
+  min-height:26px;
+  padding:0 9px;
+  border:1px solid var(--line);
+  border-radius:6px;
+  background:linear-gradient(
+    to bottom,
+    rgba(235,219,178,.055),
+    rgba(60,56,54,.18)
+  );
+  box-shadow:
+    inset 1px 1px 2px rgba(255,255,255,.035),
+    inset -1px -1px 2px rgba(0,0,0,.42),
+    0 2px 4px rgba(0,0,0,.35);
+  color:var(--text);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.03em;
+  cursor:pointer;
+}
+
+.pending-bar button:active{
+  background:var(--panel2);
+  box-shadow:
+    inset 1px 1px 2px rgba(0,0,0,.32),
+    inset -1px -1px 2px rgba(255,255,255,.025);
+}
+
+.pending-bar button:disabled{
+  opacity:.45;
+  cursor:default;
 }
 
 .matrix-head,.app-row{
@@ -325,7 +394,8 @@ button{color:inherit}
   text-align:center;
   box-shadow:
     inset 1px 1px 2px rgba(255,255,255,.035),
-    inset -1px 0 2px rgba(0,0,0,.35);
+    inset -1px 0 2px rgba(0,0,0,.35),
+    0 3px 8px rgba(0,0,0,.45);
 }
 .matrix-head .apphead{text-align:left;padding-left:9px;display:flex;align-items:center;gap:6px}.refresh-apps-list{flex:none;width:18px;height:18px;box-sizing:border-box;padding:3%;border:1px solid var(--line);border-radius:5px;background:linear-gradient(to bottom,rgba(235,219,178,.04),rgba(60,56,54,.16));box-shadow:inset 1px 1px 1px rgba(255,255,255,.035),inset -1px -1px 1px rgba(0,0,0,.28),0 1px 2px rgba(0,0,0,.2);color:var(--text);font-size:17px;font-weight:600;letter-spacing:0;line-height:1;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center}.refresh-apps-list:active{background:var(--panel2);box-shadow:inset 1px 1px 1px rgba(0,0,0,.32),inset -1px -1px 1px rgba(255,255,255,.025)}
 #appRows{
@@ -467,8 +537,32 @@ button{color:inherit}
   white-space:nowrap;
   opacity:.85;
 }
-.toast{position:fixed;left:50%;bottom:20px;transform:translate(-50%,20px);opacity:0;pointer-events:none;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;z-index:100;color:var(--text);transition:opacity .12s,transform .12s}
-.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast{
+  position:fixed;
+  left:50%;
+  bottom:20px;
+  transform:translate(-50%,20px);
+  opacity:0;
+  pointer-events:none;
+  background:#282927;
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:8px 12px;
+  z-index:100;
+  color:var(--text);
+  font-size:11px;
+  line-height:1.2;
+  box-shadow:
+    inset 1px 1px 2px rgba(255,255,255,.035),
+    inset -1px -1px 2px rgba(0,0,0,.42),
+    0 3px 8px rgba(0,0,0,.45);
+  transition:opacity .18s,transform .18s;
+}
+
+.toast.show{
+  opacity:1;
+  transform:translate(-50%,0);
+}
 .modal-back{
   position:fixed;
   inset:0;
@@ -686,6 +780,13 @@ button{color:inherit}
   text-align:center;
 }
 
+#importProcessingText{
+  overflow-wrap:anywhere;
+  word-break:break-word;
+  max-height:180px;
+  overflow-y:auto;
+}
+
 .import-processing-spinner{
   width:28px;
   height:28px;
@@ -802,12 +903,19 @@ button{color:inherit}
     </div>
   </main>
 
+  <div id="pendingBar" class="pending-bar">
+    <span id="pendingCount">No pending changes</span>
+    <button id="applyPendingButton" type="button" onclick="applyPendingPolicy()" disabled>
+      APPLY RULES
+    </button>
+  </div>
+
 </div>
 
 <div class="legend">
   <span><i class="blocked"></i> blocked</span>
   <span><i class="allow"></i> allowed</span>
-  <span>tap a cell to change</span>
+  <span>tap cells to edit · apply when ready</span>
 </div>
 
 <div class="footer">
@@ -852,6 +960,12 @@ button{color:inherit}
       Please wait while your policy changes are applied.
     </p>
     <div class="import-processing-spinner"></div>
+    <button id="importProcessingClose"
+            type="button"
+            style="display:none"
+            onclick="closeImportProcessingFailure()">
+      Close
+    </button>
   </div>
 </div>
 
@@ -926,6 +1040,8 @@ let clearLogTarget="system";
 let apps=[];
 let profiles=[];
 let policy=new Map();
+let appliedPolicy=new Map();
+let policyApplyBusy=false;
 let appFilter="all";
 let selectedProfile="all";
 let writeBusy=false;
@@ -975,6 +1091,63 @@ function updateRuleCount(){
   const el=document.getElementById("ruleCount");
   el.textContent=policy.size;
   el.classList.toggle("blocked-count",policy.size>0);
+}
+
+function getAppliedPolicySignature(){
+  return Array.from(appliedPolicy.keys()).sort().join("\n");
+}
+
+function hasPendingPolicyChanges(){
+  return getPolicySignature()!==getAppliedPolicySignature();
+}
+
+function updatePendingBar(){
+  const count=document.getElementById("pendingCount");
+  const button=document.getElementById("applyPendingButton");
+  if(!count || !button)return;
+
+  const pending=hasPendingPolicyChanges();
+
+  if(pending){
+    const added=Array.from(policy.keys()).filter(k=>!appliedPolicy.has(k)).length;
+    const removed=Array.from(appliedPolicy.keys()).filter(k=>!policy.has(k)).length;
+    const total=added+removed;
+
+    count.textContent=
+      total+
+      " pending change"+
+      (total===1?"":"s");
+
+    button.disabled=policyApplyBusy;
+  }else{
+    count.textContent="No pending changes";
+    button.disabled=true;
+  }
+}
+
+function transactionCandidateFromPolicy(source){
+  const candidate=new Map();
+
+  source.forEach((value,key)=>{
+    const parts=key.split("|");
+    if(parts.length!==4)return;
+    candidate.set(key+"|BLOCK",true);
+  });
+
+  return candidate;
+}
+
+function uiPolicyFromTransactionCandidate(candidate){
+  const next=new Map();
+
+  candidate.forEach((value,key)=>{
+    const parts=key.split("|");
+    if(parts.length===5 && parts[4]==="BLOCK"){
+      next.set(parts.slice(0,4).join("|"),true);
+    }
+  });
+
+  return next;
 }
 
 let staleAuditData={
@@ -1180,7 +1353,7 @@ async function loadPolicy(){
   const data=await api("/policy");
   if(requestGeneration!==policyRequestGeneration)return;
 
-  policy.clear();
+  const next=new Map();
 
   if(Array.isArray(data.rules)){
     data.rules.forEach(r=>{
@@ -1190,27 +1363,18 @@ async function loadPolicy(){
         ["MOBILE","WIFI","LAN"].includes(r.network) &&
         r.action==="BLOCK"
       ){
-        policy.set(String(r.user)+"|"+String(r.pkg)+"|"+String(r.uid)+"|"+r.network,true);
+        next.set(
+          String(r.user)+"|"+String(r.pkg)+"|"+String(r.uid)+"|"+r.network,
+          true
+        );
       }
     });
   }
 
+  policy=new Map(next);
+  appliedPolicy=new Map(next);
   updateRuleCount();
-}
-
-async function postPolicy(user,pkg,uid,network,action){
-  return api("/policy",{
-    method:"POST",
-    headers:{
-      "Content-Type":"application/x-www-form-urlencoded"
-    },
-    body:new URLSearchParams({
-      user:String(user),
-      pkg:String(pkg),
-      network:network,
-      action:action
-    }).toString()
-  });
+  updatePendingBar();
 }
 
 async function setPolicy(user,pkg,uid,network,blocked){
@@ -1219,10 +1383,11 @@ async function setPolicy(user,pkg,uid,network,blocked){
   writeBusy=true;
 
   try{
-    const key=String(user)+"|"+String(pkg)+"|"+String(uid)+"|"+network;
-    const action=blocked?"BLOCK":"ALLOW";
-
-    await postPolicy(user,pkg,uid,network,action);
+    const key=
+      String(user)+"|"+
+      String(pkg)+"|"+
+      String(uid)+"|"+
+      network;
 
     if(blocked){
       policy.set(key,true);
@@ -1232,6 +1397,7 @@ async function setPolicy(user,pkg,uid,network,blocked){
 
     updateRuleCount();
     policySignature=getPolicySignature();
+    updatePendingBar();
     toast("Policy updated");
   }finally{
     writeBusy=false;
@@ -1586,9 +1752,11 @@ async function bulkNetwork(n,action){
 
   try{
     for(const a of rows){
-      await postPolicy(a.user,a.pkg,a.uid,n,action);
-
-      const key=String(a.user)+"|"+String(a.pkg)+"|"+String(a.uid)+"|"+n;
+      const key=
+        String(a.user)+"|"+
+        String(a.pkg)+"|"+
+        String(a.uid)+"|"+
+        n;
 
       if(block){
         policy.set(key,true);
@@ -1602,17 +1770,16 @@ async function bulkNetwork(n,action){
 
     updateRuleCount();
     policySignature=getPolicySignature();
+    updatePendingBar();
     render();
     finishBulkProgress(true,label+" complete","");
     toast("Policy updated");
   }catch(e){
-    finishBulkProgress(false,"Stopped after "+done+" of "+total+" apps","PF-BULK-005");
-    await loadPolicy().catch(()=>{});
-    policySignature=getPolicySignature();
-    render();
+    finishBulkProgress(false,"Bulk policy edit failed","PF-BULK-005");
     toast("Bulk update failed");
   }finally{
     writeBusy=false;
+    updatePendingBar();
   }
 }
 
@@ -1645,6 +1812,16 @@ async function readEngine(){
 }
 
 async function refreshAll(){
+  if(writeBusy){
+    toast("Policy update in progress");
+    return;
+  }
+
+  if(hasPendingPolicyChanges()){
+    toast("Apply pending policy changes first");
+    return;
+  }
+
   toast("Refreshing…");
 
   try{
@@ -1768,6 +1945,65 @@ function exportBackup(){
   toast("Policy exported");
   setTaskStatus("READY");
 }
+async function applyPendingPolicy(){
+  if(policyApplyBusy || writeBusy)return;
+
+  if(!hasPendingPolicyChanges()){
+    updatePendingBar();
+    return;
+  }
+
+  const candidate=new Map(policy);
+  const transactionCandidate=transactionCandidateFromPolicy(candidate);
+
+  policyApplyBusy=true;
+  writeBusy=true;
+  setTaskStatus("UPDATING");
+  updatePendingBar();
+  showImportProcessingModal(
+    "Applying policy changes",
+    "Validating and applying your firewall policy changes."
+  );
+
+  try{
+    await new Promise(resolve=>{
+      requestAnimationFrame(()=>{
+        requestAnimationFrame(resolve);
+      });
+    });
+
+    await commitImportedPolicy(transactionCandidate);
+
+    appliedPolicy=new Map(candidate);
+    policy=new Map(candidate);
+    updateRuleCount();
+    policySignature=getPolicySignature();
+    updatePendingBar();
+    render();
+    setTaskStatus("READY");
+    hideImportProcessingModal();
+    writeBusy=false;
+    policyApplyBusy=false;
+    updatePendingBar();
+    await scanStaleRules(false);
+    toast("Policy applied");
+  }catch(e){
+    console.error(
+      "TIRN Security pending policy apply failed:",
+      e
+    );
+
+    setTaskStatus("ERROR");
+    updatePendingBar();
+    showImportProcessingFailure(
+      e&&e.message
+        ? e.message
+        : "The firewall policy could not be applied."
+    );
+    toast("Policy apply failed");
+  }
+}
+
 async function commitImportedPolicy(candidate,endpoint="/policy-import-commit"){
   const lines=Array.from(candidate.keys()).sort();
   const body=lines.length?lines.join("\n")+"\n":"";
@@ -1794,9 +2030,13 @@ async function commitImportedPolicy(candidate,endpoint="/policy-import-commit"){
 }
 
 function applyImportedPolicy(candidate){
-  policy=new Map(candidate);
+  const next=uiPolicyFromTransactionCandidate(candidate);
+
+  policy=new Map(next);
+  appliedPolicy=new Map(next);
   updateRuleCount();
   policySignature=getPolicySignature();
+  updatePendingBar();
   render();
 }
 
@@ -1817,6 +2057,11 @@ async function importBackup(file){
 
     if(writeBusy){
       toast("Policy update in progress");
+      return;
+    }
+
+    if(hasPendingPolicyChanges()){
+      toast("Apply pending policy changes first");
       return;
     }
 
@@ -1884,6 +2129,18 @@ async function importBackup(file){
 
     hideImportProcessingModal();
     setTaskStatus("READY");
+
+    writeBusy=false;
+
+    try{
+      await scanStaleRules(false);
+    }catch(e){
+      console.error(
+        "TIRN Security post-import stale scan failed:",
+        e
+      );
+    }
+
     toast("Policy imported");
     showImportCompleteModal(valid);
 
@@ -2250,6 +2507,15 @@ async function finishStaleImportIfDone(){
 
   if(staleImportCommitStarted)return;
 
+  if(hasPendingPolicyChanges()){
+    staleImportCommitStarted=false;
+    staleImportBusy=false;
+    hideStaleImportModal();
+    setTaskStatus("ERROR");
+    toast("Apply pending policy changes first");
+    return;
+  }
+
   staleImportCommitStarted=true;
   staleImportBusy=true;
   renderStaleImportRules();
@@ -2451,9 +2717,38 @@ function hideBulkProgress(){
 function showImportProcessingModal(title,text){
   const h=document.getElementById("importProcessingTitle");
   const t=document.getElementById("importProcessingText");
+  const close=document.getElementById("importProcessingClose");
+  const spinner=document.querySelector(".import-processing-spinner");
+
   if(title)h.textContent=title;
   if(text)t.textContent=text;
+
+  close.style.display="none";
+  spinner.style.display="block";
   document.getElementById("importProcessingBack").style.display="flex";
+}
+
+function showImportProcessingFailure(message){
+  const h=document.getElementById("importProcessingTitle");
+  const t=document.getElementById("importProcessingText");
+  const close=document.getElementById("importProcessingClose");
+  const spinner=document.querySelector(".import-processing-spinner");
+
+  h.textContent="Policy apply failed";
+  t.textContent=
+    message||
+    "The firewall policy could not be applied.";
+
+  spinner.style.display="none";
+  close.style.display="inline-block";
+  document.getElementById("importProcessingBack").style.display="flex";
+}
+
+function closeImportProcessingFailure(){
+  hideImportProcessingModal();
+  writeBusy=false;
+  policyApplyBusy=false;
+  updatePendingBar();
 }
 
 function hideImportProcessingModal(){
@@ -2561,23 +2856,19 @@ async function confirmClearAll(){
     return;
   }
 
-  writeBusy=true;
-  policyRequestGeneration++;
-  setTaskStatus("UPDATING");
-
-  try{
-    await api("/clear");
-    policy.clear();
-    policySignature=getPolicySignature();
-    render();
-    setTaskStatus("READY");
-    toast("Policy cleared");
-  }catch(e){
-    setTaskStatus("ERROR");
-    toast("Clear failed");
-  }finally{
-    writeBusy=false;
+  if(!policy.size){
+    updatePendingBar();
+    return;
   }
+
+  policyRequestGeneration++;
+  policy.clear();
+  updateRuleCount();
+  policySignature=getPolicySignature();
+  updatePendingBar();
+  render();
+
+  await applyPendingPolicy();
 }
 
 async function init(){
@@ -2633,7 +2924,12 @@ async function refreshAppRevision(force=false){
 }
 
 async function refreshPolicy(force=false){
-  if(policyRefreshBusy || writeBusy || document.visibilityState!=="visible") return;
+  if(
+    policyRefreshBusy ||
+    writeBusy ||
+    hasPendingPolicyChanges() ||
+    document.visibilityState!=="visible"
+  ) return;
   policyRefreshBusy=true;
   try{
     const before=policySignature;

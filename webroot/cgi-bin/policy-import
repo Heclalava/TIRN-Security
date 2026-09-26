@@ -140,9 +140,9 @@ function process_app(o,    u,uid,pkg,name,sys,id){
     sys=jbool(o,"system")
 
     if(uid!="" && pkg!="" && u!=""){
-        app_uid[u SUBSEP pkg SUBSEP name]=uid
-        app_name[u SUBSEP pkg SUBSEP name]=name
-        app_system[u SUBSEP pkg SUBSEP name]=sys
+        app_uid[u SUBSEP pkg]=uid
+        app_name[u SUBSEP pkg]=name
+        app_system[u SUBSEP pkg]=sys
         apps_seen++
     } else {
         id=jval(o,"id")
@@ -219,7 +219,7 @@ function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,c
         return
     }
 
-    key=user SUBSEP pkg SUBSEP name
+    key=user SUBSEP pkg
     current_uid=app_uid[key]
     current_name=app_name[key]
     current_profile=profile_name[user]
