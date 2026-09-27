@@ -2057,6 +2057,16 @@ bootstrap_post_refresh()
 }
 
 
+bootstrap_initialize() {
+    if [ -f "$POLICY_STATE_FILE" ] &&
+       [ -f "$STATE_FILE" ]; then
+        bootstrap_existing_install
+    else
+        bootstrap_fresh_install
+    fi
+}
+
+
 bootstrap_existing_install() {
     CACHE_RECOVERY=0
 
