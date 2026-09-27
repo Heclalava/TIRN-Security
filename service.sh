@@ -1329,6 +1329,7 @@ bootstrap_main_chain_fail_closed_family() {
 
     if ! chain_exists "$IPT" "$MAIN_CHAIN"; then
         "$IPT" -w 5 -N "$MAIN_CHAIN" || return 1
+        "$IPT" -w 5 -A "$MAIN_CHAIN" -o lo -j RETURN || return 1
         "$IPT" -w 5 -A "$MAIN_CHAIN" -j DROP || return 1
         "$IPT" -w 5 -A "$MAIN_CHAIN" -j RETURN || return 1
         return 0
@@ -1337,6 +1338,7 @@ bootstrap_main_chain_fail_closed_family() {
     RULES="$("$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
 
 
+    LOOPBACK_COUNT=0
     DROP_COUNT=0
     RETURN_COUNT=0
     OTHER_COUNT=0
@@ -1347,6 +1349,9 @@ bootstrap_main_chain_fail_closed_family() {
         case "$RULE" in
             "-N $MAIN_CHAIN")
                 continue
+                ;;
+            "-A $MAIN_CHAIN -o lo -j RETURN")
+                LOOPBACK_COUNT=$((LOOPBACK_COUNT + 1))
                 ;;
             "-A $MAIN_CHAIN -j DROP")
                 DROP_COUNT=$((DROP_COUNT + 1))
@@ -1363,26 +1368,36 @@ $RULES
 EOF
 
     # An existing generation or guard is not modified here.
+    ACTIVE_GENERATION="$(
+        "$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
+            sed -n 's/^-A TIRNFW -j \(TIRNFW-G[0-9][0-9]*\)$/\1/p' |
+            head -n 1
+    )"
+
     if generation_verify_stable_dispatcher_family \
-        "$(
-            "$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
-                sed -n 's/^-A TIRNFW -j \(TIRNFW-G[0-9][0-9]*\)$/\1/p' |
-                head -n 1
-        )" "$FAMILY" 2>/dev/null; then
+        "$ACTIVE_GENERATION" "$FAMILY" 2>/dev/null; then
+        if [ "$LOOPBACK_COUNT" -eq 0 ]; then
+            "$IPT" -w 5 -I "$MAIN_CHAIN" 1 -o lo -j RETURN || return 1
+        elif [ "$LOOPBACK_COUNT" -ne 1 ]; then
+            return 1
+        fi
         return 0
     fi
 
     # A completely empty/legacy-unknown chain must never be converted
-    # destructively. Only the exact two-rule fail-closed baseline is safe.
+    # destructively. Only the exact loopback + DROP + RETURN baseline is safe.
+    [ "$LOOPBACK_COUNT" -eq 1 ] || return 1
     [ "$DROP_COUNT" -eq 1 ] || return 1
     [ "$RETURN_COUNT" -eq 1 ] || return 1
     [ "$OTHER_COUNT" -eq 0 ] || return 1
 
     FIRST_RULE="$(printf '%s\n' "$RULES" | sed -n '2p')"
     SECOND_RULE="$(printf '%s\n' "$RULES" | sed -n '3p')"
+    THIRD_RULE="$(printf '%s\n' "$RULES" | sed -n '4p')"
 
-    [ "$FIRST_RULE" = "-A $MAIN_CHAIN -j DROP" ] || return 1
-    [ "$SECOND_RULE" = "-A $MAIN_CHAIN -j RETURN" ] || return 1
+    [ "$FIRST_RULE" = "-A $MAIN_CHAIN -o lo -j RETURN" ] || return 1
+    [ "$SECOND_RULE" = "-A $MAIN_CHAIN -j DROP" ] || return 1
+    [ "$THIRD_RULE" = "-A $MAIN_CHAIN -j RETURN" ] || return 1
 
     return 0
 }
