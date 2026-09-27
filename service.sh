@@ -2168,19 +2168,11 @@ bootstrap_existing_install() {
         return 1
     fi
 
-    if ! cp -f "$PREPARED_POLICY" "$POLICY_STATE_FILE"; then
+    if ! policy_state_transaction_commit "$PREPARED_POLICY"; then
         rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
         release_firewall_lock
         log_error "Firewall" "Existing install bootstrap failed" \
             "applied policy commit failed"
-        return 1
-    fi
-
-    if ! chmod 600 "$POLICY_STATE_FILE"; then
-        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
-        release_firewall_lock
-        log_error "Firewall" "Existing install bootstrap failed" \
-            "applied policy permissions failed"
         return 1
     fi
 
@@ -2292,19 +2284,11 @@ bootstrap_fresh_install() {
         return 1
     fi
 
-    if ! cp -f "$PREPARED_POLICY" "$POLICY_STATE_FILE"; then
+    if ! policy_state_transaction_commit "$PREPARED_POLICY"; then
         rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
         release_firewall_lock
         log_error "Firewall" "Bootstrap failed" \
             "unable to commit applied policy; verified firewall remains active"
-        return 1
-    fi
-
-    if ! chmod 600 "$POLICY_STATE_FILE"; then
-        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
-        release_firewall_lock
-        log_error "Firewall" "Bootstrap failed" \
-            "unable to secure policy.applied permissions; verified firewall remains active"
         return 1
     fi
 
@@ -3495,6 +3479,32 @@ policy_pointer_active_generation_complete() {
     printf '%s\n' "$OLD4"
 }
 
+
+policy_state_transaction_commit() {
+    SOURCE="$1"
+
+    [ -f "$SOURCE" ] || return 1
+
+    POLICY_STATE_TMP="$DATA_DIR/policy.applied.transaction.tmp.$$"
+
+    if ! cp -f "$SOURCE" "$POLICY_STATE_TMP"; then
+        rm -f "$POLICY_STATE_TMP"
+        return 1
+    fi
+
+    if ! chmod 600 "$POLICY_STATE_TMP"; then
+        rm -f "$POLICY_STATE_TMP"
+        return 1
+    fi
+
+    if ! mv -f "$POLICY_STATE_TMP" "$POLICY_STATE_FILE"; then
+        rm -f "$POLICY_STATE_TMP"
+        return 1
+    fi
+
+    cmp -s "$SOURCE" "$POLICY_STATE_FILE"
+}
+
 policy_generation_transaction() {
     PREPARED_POLICY="$1"
 
@@ -3592,26 +3602,78 @@ policy_generation_transaction() {
         return 1
     fi
 
-    if ! policy_generation_verify_complete "$NEW_GEN"; then
+    if ! policy_generation_verify_complete "$NEW_GEN" ||
+       ! policy_pointer_verify_complete; then
         log_error "Firewall" \
-            "New policy generation verification failed after activation" \
-            "generation=$NEW_GEN"
+            "New policy generation verification failed after activation; beginning rollback" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        ROLLBACK_OK=1
+
+        policy_pointer_restore_family ipv4 "$OLD_GEN" || ROLLBACK_OK=0
+        policy_pointer_restore_family ipv6 "$OLD_GEN" || ROLLBACK_OK=0
+        policy_pointer_verify_complete || ROLLBACK_OK=0
+
+        if [ "$ROLLBACK_OK" -ne 1 ]; then
+            log_error "Firewall" \
+                "Policy pointer rollback verification failed" \
+                "generation=$NEW_GEN old=$OLD_GEN"
+            return 1
+        fi
+
+        if ! generation_guard_remove; then
+            log_error "Firewall" \
+                "Guard removal after policy verification rollback failed" \
+                "generation=$NEW_GEN"
+            return 1
+        fi
+
+        policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+
+        log_warn "Firewall" "Policy generation rollback verified" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
         return 1
     fi
 
-    if ! policy_generation_delete_family "$OLD_GEN" ipv4 ||
-       ! policy_generation_delete_family "$OLD_GEN" ipv6; then
-        log_error "Firewall" \
-            "Old policy generation cleanup failed" \
-            "generation=$NEW_GEN old=$OLD_GEN"
-        return 1
+    OLD_CLEANUP_OK=1
+
+    if ! policy_generation_delete_family "$OLD_GEN" ipv4; then
+        OLD_CLEANUP_OK=0
+        log_warn "Firewall" \
+            "Old IPv4 policy generation cleanup deferred" \
+            "generation=$OLD_GEN active=$NEW_GEN"
+    fi
+
+    if ! policy_generation_delete_family "$OLD_GEN" ipv6; then
+        OLD_CLEANUP_OK=0
+        log_warn "Firewall" \
+            "Old IPv6 policy generation cleanup deferred" \
+            "generation=$OLD_GEN active=$NEW_GEN"
     fi
 
     if ! policy_pointer_verify_complete ||
        ! policy_generation_verify_complete "$NEW_GEN"; then
         log_error "Firewall" \
-            "Post-cleanup policy verification failed" \
-            "generation=$NEW_GEN"
+            "Post-cleanup policy verification failed; fail-closed guard retained" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        return 1
+    fi
+
+    if ! policy_state_transaction_commit "$PREPARED_POLICY"; then
+        log_error "Firewall" \
+            "policy.applied commit failed after generation activation; rollback required" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+
+        policy_pointer_restore_family ipv4 "$OLD_GEN" || true
+        policy_pointer_restore_family ipv6 "$OLD_GEN" || true
+
+        policy_pointer_verify_complete || true
+
+        generation_guard_remove || true
+        policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+
         return 1
     fi
 
@@ -3628,16 +3690,14 @@ policy_generation_transaction() {
         return 1
     fi
 
-    if ! policy_pointer_verify_complete ||
-       ! policy_generation_verify_complete "$NEW_GEN"; then
-        log_error "Firewall" \
-            "Final policy transaction verification failed" \
-            "generation=$NEW_GEN"
-        return 1
+    if [ "$OLD_CLEANUP_OK" -eq 1 ]; then
+        log_info "Firewall" "Policy generation activated" \
+            "generation=$NEW_GEN old=$OLD_GEN"
+    else
+        log_warn "Firewall" \
+            "Policy generation activated with old cleanup deferred" \
+            "generation=$NEW_GEN old=$OLD_GEN"
     fi
-
-    log_info "Firewall" "Policy generation activated" \
-        "generation=$NEW_GEN old=$OLD_GEN"
 
     return 0
 }
@@ -4228,7 +4288,6 @@ apply_dispatcher() {
 apply_policy() {
     PREPARED_POLICY="$DATA_DIR/policy.prepared.$$"
     PREPARED_COUNT="$DATA_DIR/policy.count.$$"
-    TMP_STATE="$DATA_DIR/network.state.tmp.$$"
 
     if ! acquire_firewall_lock; then
         log_error "Policy" "Apply failed" \
@@ -4237,53 +4296,21 @@ apply_policy() {
     fi
 
     if ! prepare_policy "$PREPARED_POLICY" "$PREPARED_COUNT"; then
-        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT" "$TMP_STATE"
+        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
         release_firewall_lock
         return 1
     fi
 
     if [ -f "$POLICY_STATE_FILE" ] &&
        cmp -s "$PREPARED_POLICY" "$POLICY_STATE_FILE"; then
-        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT" "$TMP_STATE"
+        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
         release_firewall_lock
         log_info "Policy" "No change" \
             "prepared policy matches policy.applied; firewall generation retained"
         return 0
     fi
 
-    if ! build_network_state > "$TMP_STATE"; then
-        rm -f "$PREPARED_POLICY" "$PREPARED_COUNT" "$TMP_STATE"
-        release_firewall_lock
-        log_error "Network" "State build failed"
-        return 1
-    fi
-
-    if generation_switch_transaction \
-        "$TMP_STATE" "$PREPARED_POLICY"; then
-
-        if ! mv -f "$TMP_STATE" "$STATE_FILE"; then
-            log_error "Policy" "State commit failed" \
-                "generation transaction succeeded but network.state could not be committed"
-            rm -f "$PREPARED_COUNT"
-            release_firewall_lock
-            return 1
-        fi
-
-        if ! cp -f "$PREPARED_POLICY" "$POLICY_STATE_FILE"; then
-            log_error "Policy" "Applied policy commit failed" \
-                "generation transaction succeeded but policy.applied could not be committed"
-            rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
-            release_firewall_lock
-            return 1
-        fi
-
-        if ! chmod 600 "$POLICY_STATE_FILE"; then
-            log_error "Policy" "Applied policy permissions failed" \
-                "generation transaction succeeded but policy.applied mode could not be set"
-            rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
-            release_firewall_lock
-            return 1
-        fi
+    if policy_generation_transaction "$PREPARED_POLICY"; then
 
         APPLIED_COUNT="$(wc -l < "$POLICY_STATE_FILE" 2>/dev/null)"
         APPLIED_COUNT="$(printf '%s' "$APPLIED_COUNT" | tr -d ' ')"
@@ -4295,11 +4322,11 @@ apply_policy() {
         return 0
     fi
 
-    rm -f "$PREPARED_POLICY" "$PREPARED_COUNT" "$TMP_STATE"
+    rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
     release_firewall_lock
 
     log_error "Policy" "Apply failed" \
-        "existing generation retained"
+        "existing policy generation retained"
     return 1
 }
 
