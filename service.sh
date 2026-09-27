@@ -414,6 +414,9 @@ network_generation_populate_family() {
 
                 "$IPT" -w 5 -A "$DISP" \
                     -o "$VALUE" -j "$MOB" || return 1
+
+                "$IPT" -w 5 -A "$DISP" \
+                    -o "$VALUE" -j ACCEPT || return 1
                 ;;
 
             WLAN4)
@@ -424,7 +427,7 @@ network_generation_populate_family() {
                     -d "$VALUE" -o wlan0 -j "$LAN" || return 1
 
                 "$IPT" -w 5 -A "$DISP" \
-                    -d "$VALUE" -o wlan0 -j RETURN || return 1
+                    -d "$VALUE" -o wlan0 -j ACCEPT || return 1
                 ;;
 
             WLAN6)
@@ -435,7 +438,7 @@ network_generation_populate_family() {
                     -d "$VALUE" -o wlan0 -j "$LAN" || return 1
 
                 "$IPT" -w 5 -A "$DISP" \
-                    -d "$VALUE" -o wlan0 -j RETURN || return 1
+                    -d "$VALUE" -o wlan0 -j ACCEPT || return 1
                 ;;
         esac
     done < "$NETWORK_STATE"
@@ -444,11 +447,17 @@ network_generation_populate_family() {
         if grep -q '^WLAN4|' "$NETWORK_STATE"; then
             "$IPT" -w 5 -A "$DISP" \
                 -o wlan0 -j "$WIFI" || return 1
+
+            "$IPT" -w 5 -A "$DISP" \
+                -o wlan0 -j ACCEPT || return 1
         fi
     else
         if grep -q '^WLAN6|' "$NETWORK_STATE"; then
             "$IPT" -w 5 -A "$DISP" \
                 -o wlan0 -j "$WIFI" || return 1
+
+            "$IPT" -w 5 -A "$DISP" \
+                -o wlan0 -j ACCEPT || return 1
         fi
     fi
 
@@ -474,11 +483,14 @@ network_generation_populate_family() {
                             -o "$VPN_IFACE" -d "$WLAN_VALUE" -j "$LAN" || return 1
 
                         "$IPT" -w 5 -A "$DISP" \
-                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j RETURN || return 1
+                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j ACCEPT || return 1
                     done < "$NETWORK_STATE"
 
                     "$IPT" -w 5 -A "$DISP" \
                         -o "$VPN_IFACE" -j "$WIFI" || return 1
+
+                    "$IPT" -w 5 -A "$DISP" \
+                        -o "$VPN_IFACE" -j ACCEPT || return 1
                 else
                     if ! grep -q '^WLAN6|' "$NETWORK_STATE"; then
                         log_error "Firewall" "Unsupported VPN topology" \
@@ -494,17 +506,23 @@ network_generation_populate_family() {
                             -o "$VPN_IFACE" -d "$WLAN_VALUE" -j "$LAN" || return 1
 
                         "$IPT" -w 5 -A "$DISP" \
-                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j RETURN || return 1
+                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j ACCEPT || return 1
                     done < "$NETWORK_STATE"
 
                     "$IPT" -w 5 -A "$DISP" \
                         -o "$VPN_IFACE" -j "$WIFI" || return 1
+
+                    "$IPT" -w 5 -A "$DISP" \
+                        -o "$VPN_IFACE" -j ACCEPT || return 1
                 fi
                 ;;
 
             rmnet*)
                 "$IPT" -w 5 -A "$DISP" \
                     -o "$VPN_IFACE" -j "$MOB" || return 1
+
+                "$IPT" -w 5 -A "$DISP" \
+                    -o "$VPN_IFACE" -j ACCEPT || return 1
                 ;;
 
             *)
@@ -568,6 +586,12 @@ network_generation_verify_family() {
             "-A $DISP -j $WIFI")
                 ;;
             "-A $DISP -j $MOB")
+                ;;
+            "-A $DISP -o "*"-j ACCEPT")
+                ;;
+            "-A $DISP -d "*"-o "*"-j ACCEPT")
+                ;;
+            "-A $DISP -o "*"-d "*"-j ACCEPT")
                 ;;
             "-A $DISP -j RETURN")
                 RETURN_COUNT=$((RETURN_COUNT + 1))
