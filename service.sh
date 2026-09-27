@@ -607,6 +607,22 @@ policy_pointer_chain_exists() {
     chain_exists "$IPT" "$CHAIN"
 }
 
+policy_pointer_family_exists() {
+    FAMILY="$1"
+
+    case "$FAMILY" in
+        ipv4) IPT="$IPTABLES" ;;
+        ipv6) IPT="$IP6TABLES" ;;
+        *) return 1 ;;
+    esac
+
+    policy_pointer_chain_exists "$IPT" "$(policy_mobile_pointer_chain)" || return 1
+    policy_pointer_chain_exists "$IPT" "$(policy_wifi_pointer_chain)" || return 1
+    policy_pointer_chain_exists "$IPT" "$(policy_lan_pointer_chain)" || return 1
+
+    return 0
+}
+
 policy_pointer_create_family() {
     FAMILY="$1"
 
@@ -2150,7 +2166,8 @@ bootstrap_existing_install() {
 
         if ! policy_pointer_create_family ipv4 ||
            ! policy_pointer_create_family ipv6 ||
-           ! policy_pointer_verify_complete; then
+           ! policy_pointer_family_exists ipv4 ||
+           ! policy_pointer_family_exists ipv6; then
             rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
             release_firewall_lock
             log_error "Firewall" "Existing install bootstrap failed" \
@@ -3577,7 +3594,8 @@ policy_generation_transaction() {
 
         if ! policy_pointer_create_family ipv4 ||
            ! policy_pointer_create_family ipv6 ||
-           ! policy_pointer_verify_complete; then
+           ! policy_pointer_family_exists ipv4 ||
+           ! policy_pointer_family_exists ipv6; then
             log_error "Firewall" \
                 "Initial policy pointer family creation failed" ""
             return 1
