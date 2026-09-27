@@ -1291,7 +1291,25 @@ network_generation_install_active_ipv4() {
     DISP="$(network_dispatcher_chain "$GEN")"
 
     network_dispatcher_chain_exists "$IPTABLES" "$DISP" || return 1
-    "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$DISP"
+
+    LOOPBACK_POSITION="$(
+        "$IPTABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
+            awk -v chain="$MAIN_CHAIN" '
+                /^-A / { RULE_POSITION++ }
+                $0 == "-A " chain " -o lo -j RETURN" {
+                    print RULE_POSITION
+                    exit
+                }
+            '
+    )"
+    case "$LOOPBACK_POSITION" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    INSERT_POSITION=$((LOOPBACK_POSITION + 1))
+    "$IPTABLES" -w 5 -I "$MAIN_CHAIN" "$INSERT_POSITION" -j "$DISP"
 }
 
 network_generation_install_active_ipv6() {
@@ -1299,7 +1317,25 @@ network_generation_install_active_ipv6() {
     DISP="$(network_dispatcher_chain "$GEN")"
 
     network_dispatcher_chain_exists "$IP6TABLES" "$DISP" || return 1
-    "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$DISP"
+
+    LOOPBACK_POSITION="$(
+        "$IP6TABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
+            awk -v chain="$MAIN_CHAIN" '
+                /^-A / { RULE_POSITION++ }
+                $0 == "-A " chain " -o lo -j RETURN" {
+                    print RULE_POSITION
+                    exit
+                }
+            '
+    )"
+    case "$LOOPBACK_POSITION" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    INSERT_POSITION=$((LOOPBACK_POSITION + 1))
+    "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" "$INSERT_POSITION" -j "$DISP"
 }
 
 network_generation_remove_active_ipv4() {
