@@ -66,11 +66,36 @@ cleanup() {
     "$RM" -rf "$LOCK" 2>/dev/null
 }
 
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT
+trap 'cleanup; exit 0' INT TERM HUP
 
 package_from_event() {
-    printf '%s\n' "$1" |
-        "$SED" -n 's/.*package:\([A-Za-z0-9._-][A-Za-z0-9._-]*\).*/\1/p' |
+    LINE="$1"
+
+    PACKAGE="$(
+        printf '%s\n' "$LINE" |
+            "$SED" -n 's/.*package:\([A-Za-z0-9._-][A-Za-z0-9._-]*\).*/\1/p' |
+            "$SED" -n '1p'
+    )"
+
+    if [ -n "$PACKAGE" ]; then
+        printf '%s\n' "$PACKAGE"
+        return 0
+    fi
+
+    PACKAGE="$(
+        printf '%s\n' "$LINE" |
+            "$SED" -n 's/.*for package \([A-Za-z0-9._-][A-Za-z0-9._-]*\).*/\1/p' |
+            "$SED" -n '1p'
+    )"
+
+    if [ -n "$PACKAGE" ]; then
+        printf '%s\n' "$PACKAGE"
+        return 0
+    fi
+
+    printf '%s\n' "$LINE" |
+        "$SED" -n 's/.*pkg=\([A-Za-z0-9._-][A-Za-z0-9._-]*\).*/\1/p' |
         "$SED" -n '1p'
 }
 
@@ -181,19 +206,36 @@ resolve_removed_users() {
             print $1
         }
     ' "$APPS_IDENTITY" |
-        "$SORT" -nu
+    "$SORT" -nu |
+    while IFS= read -r USER
+    do
+        [ -n "$USER" ] || continue
+
+        if ! "$PM" list packages --user "$USER" -U "$PACKAGE" 2>/dev/null |
+            "$AWK" -v p="$PACKAGE" '
+                $1 == ("package:" p) && $2 ~ /^uid:[0-9]+$/ {
+                    found = 1
+                    exit
+                }
+                END {
+                    exit(found ? 0 : 1)
+                }
+            '; then
+            printf '%s\n' "$USER"
+        fi
+    done
 }
 
 write_app_event() {
-    ACTION="$1"
-    USER="$2"
-    PACKAGE="$3"
+    APP_EVENT_ACTION="$1"
+    APP_EVENT_USER="$2"
+    APP_EVENT_PACKAGE="$3"
 
     EVENT_TMP="$APP_EVENT_QUEUE/.event.$$"
-    EVENT_FILE="$APP_EVENT_QUEUE/${USER}_${PACKAGE}"
+    EVENT_FILE="$APP_EVENT_QUEUE/${APP_EVENT_USER}_${APP_EVENT_PACKAGE}"
 
     printf '%s|%s|%s\n' \
-        "$ACTION" "$USER" "$PACKAGE" > "$EVENT_TMP" || {
+        "$APP_EVENT_ACTION" "$APP_EVENT_USER" "$APP_EVENT_PACKAGE" > "$EVENT_TMP" || {
             "$RM" -f "$EVENT_TMP"
             return 1
         }
@@ -233,7 +275,7 @@ process_profile() {
         log_info "Package" "Processed" \
             "action=$ACTION user=$USER package=$PACKAGE status=${RESULT_LINE:-OK}"
 
-        EVENT_ACTION="${RESULT_LINE%%|*}"
+        EVENT_ACTION="${RESULT_LINE%%\|*}"
 
         case "$EVENT_ACTION" in
             ADDED|UPDATED|REMOVED)
@@ -363,6 +405,7 @@ process_event_file() {
                 ;;
             REMOVED)
                 USERS="$(resolve_removed_users "$PACKAGE")"
+                log_info "Package" "Removal users resolved"                     "package=$PACKAGE users=${USERS:-NONE}"
                 ;;
         esac
     fi

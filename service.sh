@@ -128,6 +128,85 @@ clear_stale_boot_locks() {
     done
 }
 
+recover_stale_app_events() {
+    APP_EVENT_DIR="$DATA_DIR/app-events"
+
+    [ -d "$APP_EVENT_DIR" ] || return 0
+
+    for EVENT_WORK in "$APP_EVENT_DIR"/.work.*; do
+        [ -f "$EVENT_WORK" ] || continue
+
+        EVENT_DATA="$(cat "$EVENT_WORK" 2>/dev/null)"
+        EVENT_ACTION="$(printf '%s\n' "$EVENT_DATA" | awk -F'|' 'NR == 1 {print $1}')"
+        EVENT_USER="$(printf '%s\n' "$EVENT_DATA" | awk -F'|' 'NR == 1 {print $2}')"
+        EVENT_PACKAGE="$(printf '%s\n' "$EVENT_DATA" | awk -F'|' 'NR == 1 {print $3}')"
+
+        case "$EVENT_ACTION" in
+            ADDED|UPDATED|REMOVED)
+                ;;
+            *)
+                rm -f "$EVENT_WORK" 2>/dev/null || true
+                log_warn "App Event" "Removed invalid stale work file" \
+                    "file=$EVENT_WORK"
+                continue
+                ;;
+        esac
+
+        case "$EVENT_USER" in
+            ''|*[!0-9]*)
+                rm -f "$EVENT_WORK" 2>/dev/null || true
+                log_warn "App Event" "Removed invalid stale work file" \
+                    "file=$EVENT_WORK"
+                continue
+                ;;
+        esac
+
+        case "$EVENT_PACKAGE" in
+            ''|*[!A-Za-z0-9._-]*)
+                rm -f "$EVENT_WORK" 2>/dev/null || true
+                log_warn "App Event" "Removed invalid stale work file" \
+                    "file=$EVENT_WORK"
+                continue
+                ;;
+        esac
+
+        EVENT_FILE="$APP_EVENT_DIR/${EVENT_USER}_${EVENT_PACKAGE}"
+
+        if [ -e "$EVENT_FILE" ]; then
+            rm -f "$EVENT_WORK" 2>/dev/null || true
+            log_warn "App Event" "Discarded duplicate stale work file" \
+                "file=$EVENT_WORK event=$EVENT_FILE"
+            continue
+        fi
+
+        if mv -f "$EVENT_WORK" "$EVENT_FILE" 2>/dev/null; then
+            log_warn "App Event" "Recovered stale work file" \
+                "file=$EVENT_WORK event=$EVENT_FILE"
+        else
+            log_error "App Event" "Stale work recovery failed" \
+                "file=$EVENT_WORK event=$EVENT_FILE"
+        fi
+    done
+}
+start_app_watch() {
+    "$MODDIR/app-watch.sh" >/dev/null 2>&1 &
+    APP_WATCH_PID=$!
+    log_info "App Watcher" "Started" "pid=$APP_WATCH_PID"
+}
+
+ensure_app_watch_running() {
+    if kill -0 "$APP_WATCH_PID" 2>/dev/null &&
+       [ -d "$DATA_DIR/app-watch.lock" ]; then
+        return 0
+    fi
+
+    log_warn "App Watcher" "Process unhealthy"         "old_pid=$APP_WATCH_PID lock=$DATA_DIR/app-watch.lock"
+
+    rm -rf "$DATA_DIR/app-watch.lock" 2>/dev/null || true
+
+    start_app_watch
+}
+
 GENERATION_GUARD_CHAIN="TIRNFW-GUARD"
 
 generation_chain_exists() {
@@ -4224,7 +4303,7 @@ apply_policy() {
     return 1
 }
 
-import_policy_transaction() {
+import_policy_transaction() (
     IMPORT_CONTEXT="${1:-import}"
     REMOVE_USER="${2:-}"
     REMOVE_PACKAGE="${3:-}"
@@ -4690,7 +4769,7 @@ import_policy_transaction() {
     fi
 
     return 0
-}
+)
 
 if [ "${1:-}" = "--refresh" ]; then
     log_info "Refresh" "Started" "manual refresh requested"
@@ -4878,6 +4957,7 @@ process_app_events() {
 log_info "Service" "Started" "module initialization"
 
 clear_stale_boot_locks
+recover_stale_app_events
 
 if ! bootstrap_initialize; then
     log_error "Service" "Initialization failed" \
@@ -4890,13 +4970,13 @@ log_info "Service" "Ready" "transactional firewall active"
 "$MODDIR/policy-watch.sh" "$POLICY_FILE:w" "$DATA_DIR:nm" >/dev/null 2>&1 &
 POLICY_WATCH_PID=$!
 
-"$MODDIR/app-watch.sh" >/dev/null 2>&1 &
-APP_WATCH_PID=$!
+start_app_watch
 
 trap 'kill "$POLICY_WATCH_PID" "$APP_WATCH_PID" 2>/dev/null || true' EXIT INT TERM
 
 while true; do
     sleep "$POLL_INTERVAL"
+    ensure_app_watch_running
     process_app_events
     apply_dispatcher
 done
