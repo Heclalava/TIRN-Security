@@ -2400,7 +2400,8 @@ bootstrap_fresh_install() {
 
         if ! policy_pointer_create_family ipv4 ||
            ! policy_pointer_create_family ipv6 ||
-           ! policy_pointer_verify_complete; then
+           ! policy_pointer_family_exists ipv4 ||
+           ! policy_pointer_family_exists ipv6; then
             rm -f "$PREPARED_POLICY" "$PREPARED_COUNT"
             release_firewall_lock
             log_error "Firewall" \
