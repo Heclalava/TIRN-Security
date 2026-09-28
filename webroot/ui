@@ -953,6 +953,14 @@ button{color:inherit}
   </div>
 </div>
 
+<div id="policyApplyCompleteBack" class="modal-back" onclick="if(event.target===this)hidePolicyApplyCompleteModal()">
+  <div class="modal import-complete-modal">
+    <h2>Policy applied successfully</h2>
+    <p>Your firewall policy changes have been applied successfully.</p>
+    <button type="button" onclick="hidePolicyApplyCompleteModal()">Close</button>
+  </div>
+</div>
+
 <div id="importProcessingBack" class="modal-back" style="z-index:120">
   <div class="modal import-processing-modal">
     <h2 id="importProcessingTitle">Applying policy changes</h2>
@@ -1987,6 +1995,7 @@ async function applyPendingPolicy(){
     updatePendingBar();
     await scanStaleRules(false);
     toast("Policy applied");
+    showPolicyApplyCompleteModal();
   }catch(e){
     console.error(
       "TIRN Security pending policy apply failed:",
@@ -2770,6 +2779,14 @@ function showImportCompleteModal(total){
 
 function hideImportCompleteModal(){
   document.getElementById("importCompleteBack").style.display="none";
+}
+
+function showPolicyApplyCompleteModal(){
+  document.getElementById("policyApplyCompleteBack").style.display="flex";
+}
+
+function hidePolicyApplyCompleteModal(){
+  document.getElementById("policyApplyCompleteBack").style.display="none";
 }
 
 function showClearConfirm(){
