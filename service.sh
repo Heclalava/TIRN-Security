@@ -4837,6 +4837,45 @@ import_policy_transaction() (
 )
 
 
+if [ "${1:-}" = "--import-policy" ]; then
+    import_policy_transaction "import"
+    exit $?
+fi
+
+if [ "${1:-}" = "--reconcile-stale-policy" ]; then
+    import_policy_transaction "stale"
+    exit $?
+fi
+
+if [ "${1:-}" = "--remove-app-policy" ]; then
+    if [ "$#" -ne 3 ]; then
+        printf '%s\n' "Usage: $0 --remove-app-policy USER PACKAGE" >&2
+        exit 2
+    fi
+
+    case "$2" in
+        ''|*[!0-9]*)
+            printf '%s\n' "Invalid user" >&2
+            exit 2
+            ;;
+    esac
+
+    case "$3" in
+        ''|*[!A-Za-z0-9._-]*)
+            printf '%s\n' "Invalid package" >&2
+            exit 2
+            ;;
+    esac
+
+    import_policy_transaction "remove" "$2" "$3"
+    exit $?
+fi
+
+if [ "${1:-}" = "--policy-event" ]; then
+    apply_policy
+    exit $?
+fi
+
 policy_has_app_rule() {
     CHECK_USER="$1"
     CHECK_PACKAGE="$2"
