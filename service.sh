@@ -28,6 +28,10 @@ LAN_CHAIN="TIRNFW-LAN"
 POLL_INTERVAL=30
 POST_BOOT_REFRESH_DELAY=30
 
+NETWORK_EVENT_FILE="$DATA_DIR/network-event.pending"
+NETWORK_WATCH_PID=""
+NETWORK_WATCH_FIFO="$DATA_DIR/network-event.monitor.$$"
+
 umask 077
 
 mkdir -p "$DATA_DIR"
@@ -188,6 +192,41 @@ recover_stale_app_events() {
         fi
     done
 }
+start_network_watch() {
+    rm -f "$NETWORK_WATCH_FIFO" 2>/dev/null || true
+
+    if ! mkfifo "$NETWORK_WATCH_FIFO" 2>/dev/null; then
+        log_error "Network Watcher" "FIFO creation failed"             "file=$NETWORK_WATCH_FIFO"
+        return 1
+    fi
+
+    (
+        MONITOR_PID=""
+
+        cleanup_network_watch() {
+            if [ -n "$MONITOR_PID" ]; then
+                kill "$MONITOR_PID" 2>/dev/null || true
+                wait "$MONITOR_PID" 2>/dev/null || true
+            fi
+            rm -f "$NETWORK_WATCH_FIFO" 2>/dev/null || true
+        }
+
+        trap 'cleanup_network_watch; exit 0' EXIT INT TERM
+
+        "$IP" monitor link address route 2>/dev/null > "$NETWORK_WATCH_FIFO" &
+        MONITOR_PID=$!
+
+        while IFS= read -r EVENT; do
+            [ -n "$EVENT" ] || continue
+            : > "$NETWORK_EVENT_FILE"
+        done < "$NETWORK_WATCH_FIFO"
+    ) &
+
+    NETWORK_WATCH_PID=$!
+
+    log_info "Network Watcher" "Started"         "pid=$NETWORK_WATCH_PID event=link,address,route"
+}
+
 start_app_watch() {
     "$MODDIR/app-watch.sh" >/dev/null 2>&1 &
     APP_WATCH_PID=$!
@@ -210,7 +249,7 @@ ensure_app_watch_running() {
 GENERATION_GUARD_CHAIN="TIRNFW-GUARD"
 
 generation_chain_exists() {
-    "$1" -w 5 -L "$2" >/dev/null 2>&1
+    "$1" -w 5 -S "$2" >/dev/null 2>&1
 }
 
 next_generation_id() {
@@ -554,7 +593,6 @@ network_generation_verify_family() {
     WIFI="$(policy_wifi_pointer_chain)"
     LAN="$(policy_lan_pointer_chain)"
 
-    network_dispatcher_chain_exists "$IPT" "$DISP" || return 1
     policy_pointer_chain_exists "$IPT" "$MOB" || return 1
     policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
     policy_pointer_chain_exists "$IPT" "$LAN" || return 1
@@ -719,8 +757,6 @@ policy_pointer_verify_family() {
     LAN="$(policy_lan_pointer_chain)"
 
     for CHAIN in "$MOB" "$WIFI" "$LAN"; do
-        policy_pointer_chain_exists "$IPT" "$CHAIN" || return 1
-
         case "$CHAIN" in
             "$MOB") SUFFIX="M" ;;
             "$WIFI") SUFFIX="W" ;;
@@ -1375,7 +1411,7 @@ network_generation_remove_active_ipv6() {
 }
 
 chain_exists() {
-    "$1" -w 5 -L "$2" >/dev/null 2>&1
+    "$1" -w 5 -S "$2" >/dev/null 2>&1
 }
 
 bootstrap_main_chain_fail_closed_family() {
@@ -1427,7 +1463,25 @@ bootstrap_main_chain_fail_closed_family() {
 $RULES
 EOF
 
-    # An existing generation or guard is not modified here.
+    # An existing network generation is not modified here.
+    ACTIVE_NETWORK_GENERATION="$(
+        "$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
+            sed -n 's/^-A TIRNFW -j \(TIRNFW-NET-G[0-9][0-9]*\)$/\1/p' |
+            head -n 1
+    )"
+
+    if [ -n "$ACTIVE_NETWORK_GENERATION" ] &&
+       network_generation_verify_complete \
+           "${ACTIVE_NETWORK_GENERATION#TIRNFW-NET-G}" 2>/dev/null; then
+        if [ "$LOOPBACK_COUNT" -eq 0 ]; then
+            "$IPT" -w 5 -I "$MAIN_CHAIN" 1 -o lo -j RETURN || return 1
+        elif [ "$LOOPBACK_COUNT" -ne 1 ]; then
+            return 1
+        fi
+        return 0
+    fi
+
+    # An existing policy generation or guard is not modified here.
     ACTIVE_GENERATION="$(
         "$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
             sed -n 's/^-A TIRNFW -j \(TIRNFW-G[0-9][0-9]*\)$/\1/p' |
@@ -2912,8 +2966,6 @@ policy_generation_verify_family() {
     LAN="$(policy_lan_chain "$GEN")"
 
     for CHAIN in "$MOB" "$WIFI" "$LAN"; do
-        generation_chain_exists "$IPT" "$CHAIN" || return 1
-
         RULES="$("$IPT" -w 5 -S "$CHAIN" 2>/dev/null)" || return 1
 
         RETURN_COUNT=0
@@ -3521,10 +3573,6 @@ policy_pointer_active_generation() {
     WIFI="$(policy_wifi_pointer_chain)"
     LAN="$(policy_lan_pointer_chain)"
 
-    policy_pointer_chain_exists "$IPT" "$MOB" || return 1
-    policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
-    policy_pointer_chain_exists "$IPT" "$LAN" || return 1
-
     RULES_M="$("$IPT" -w 5 -S "$MOB" 2>/dev/null)" || return 1
     RULES_W="$("$IPT" -w 5 -S "$WIFI" 2>/dev/null)" || return 1
     RULES_L="$("$IPT" -w 5 -S "$LAN" 2>/dev/null)" || return 1
@@ -3555,8 +3603,6 @@ policy_pointer_active_generation() {
 
     [ "$GEN_M" = "$GEN_W" ] || return 1
     [ "$GEN_M" = "$GEN_L" ] || return 1
-
-    policy_pointer_verify_family "$FAMILY" || return 1
 
     printf '%s\n' "$GEN_M"
 }
@@ -3947,6 +3993,8 @@ network_generation_transaction() {
     log_info "Firewall" "Network generation verified off-path" \
         "generation=$NEW_GEN"
 
+    NETWORK_TIMING_START=$(date +%s)
+
     if ! generation_guard_install ||
        ! generation_guard_verify; then
 
@@ -3964,6 +4012,10 @@ network_generation_transaction() {
         return 1
     fi
 
+    NETWORK_TIMING_GUARD=$(( $(date +%s) - NETWORK_TIMING_START ))
+    debug_log "Firewall" "Network activation timing" \
+        "stage=guard-installed seconds=$NETWORK_TIMING_GUARD generation=$NEW_GEN"
+
     NETWORK_SWITCHED=0
 
     if network_generation_install_active_ipv4 "$NEW_GEN" &&
@@ -3972,6 +4024,10 @@ network_generation_transaction() {
        network_generation_active_rule_ipv6 "$NEW_GEN"; then
         NETWORK_SWITCHED=1
     fi
+
+    NETWORK_TIMING_ACTIVATE=$(( $(date +%s) - NETWORK_TIMING_START ))
+    debug_log "Firewall" "Network activation timing" \
+        "stage=activation-complete seconds=$NETWORK_TIMING_ACTIVATE generation=$NEW_GEN"
 
     if [ "$NETWORK_SWITCHED" -ne 1 ]; then
         log_error "Firewall" \
@@ -4060,6 +4116,10 @@ network_generation_transaction() {
         return 1
     fi
 
+    NETWORK_TIMING_POST_ACTIVATION_VERIFY=$(( $(date +%s) - NETWORK_TIMING_START ))
+    debug_log "Firewall" "Network activation timing" \
+        "stage=post-activation-verify seconds=$NETWORK_TIMING_POST_ACTIVATION_VERIFY generation=$NEW_GEN"
+
     # Commit the authoritative network state while OLD is still available.
     # This is the persistence boundary: before this succeeds OLD remains a
     # valid rollback target; after it succeeds the new firewall generation
@@ -4098,6 +4158,10 @@ network_generation_transaction() {
         return 1
     fi
 
+    NETWORK_TIMING_PERSISTENCE=$(( $(date +%s) - NETWORK_TIMING_START ))
+    debug_log "Firewall" "Network activation timing" \
+        "stage=persistence-complete seconds=$NETWORK_TIMING_PERSISTENCE generation=$NEW_GEN"
+
     if [ -n "$OLD_GEN" ]; then
         if ! network_generation_remove_active_ipv4 "$OLD_GEN"; then
             log_error "Firewall" \
@@ -4122,6 +4186,10 @@ network_generation_transaction() {
         fi
     fi
 
+    NETWORK_TIMING_OLD_REMOVAL=$(( $(date +%s) - NETWORK_TIMING_START ))
+    debug_log "Firewall" "Network activation timing" \
+        "stage=old-generation-removal-complete seconds=$NETWORK_TIMING_OLD_REMOVAL generation=$NEW_GEN"
+
     if ! network_generation_verify_complete "$NEW_GEN" ||
        ! network_generation_active_rule_ipv4 "$NEW_GEN" ||
        ! network_generation_active_rule_ipv6 "$NEW_GEN" ||
@@ -4133,6 +4201,10 @@ network_generation_transaction() {
         return 1
     fi
 
+    NETWORK_TIMING_POST_SWITCH_VERIFY=$(( $(date +%s) - NETWORK_TIMING_START ))
+    debug_log "Firewall" "Network activation timing" \
+        "stage=post-switch-verify seconds=$NETWORK_TIMING_POST_SWITCH_VERIFY generation=$NEW_GEN"
+
     if [ -n "$OLD_GEN" ]; then
         if ! network_generation_delete_family "$OLD_GEN" ipv4 ||
            ! network_generation_delete_family "$OLD_GEN" ipv6; then
@@ -4141,6 +4213,10 @@ network_generation_transaction() {
                 "generation=$OLD_GEN active=$NEW_GEN"
         fi
     fi
+
+    NETWORK_TIMING_CLEANUP=$(( $(date +%s) - NETWORK_TIMING_START ))
+    debug_log "Firewall" "Network activation timing" \
+        "stage=old-generation-cleanup-complete seconds=$NETWORK_TIMING_CLEANUP generation=$NEW_GEN"
 
     if ! network_generation_verify_complete "$NEW_GEN" ||
        ! network_generation_active_rule_ipv4 "$NEW_GEN" ||
@@ -4152,6 +4228,12 @@ network_generation_transaction() {
             "generation=$NEW_GEN"
         return 1
     fi
+
+    NETWORK_TIMING_FINAL_VERIFY=$(( $(date +%s) - NETWORK_TIMING_START ))
+    debug_log "Firewall" "Network activation timing" \
+        "stage=final-verify seconds=$NETWORK_TIMING_FINAL_VERIFY generation=$NEW_GEN"
+
+    NETWORK_TIMING_GUARD_REMOVE_START=$(date +%s)
 
     if ! generation_guard_remove; then
         log_error "Firewall" \
@@ -4165,6 +4247,16 @@ network_generation_transaction() {
 
         return 1
     fi
+
+
+    NETWORK_TIMING_GUARD_REMOVE=$(( $(date +%s) - NETWORK_TIMING_GUARD_REMOVE_START ))
+    NETWORK_TIMING_TOTAL=$(( $(date +%s) - NETWORK_TIMING_START ))
+
+    debug_log "Firewall" "Network activation timing" \
+        "stage=guard-removed seconds=$NETWORK_TIMING_GUARD_REMOVE generation=$NEW_GEN"
+
+    debug_log "Firewall" "Network activation timing" \
+        "stage=total seconds=$NETWORK_TIMING_TOTAL generation=$NEW_GEN"
 
     log_info "Firewall" "Network generation activated" \
         "generation=$NEW_GEN old=${OLD_GEN:-none}"
@@ -4226,6 +4318,10 @@ generation_switch_transaction() {
         return 1
     fi
 
+    ACTIVATION_TIMING_START=$(date +%s)
+
+    debug_log "Timing" "Activation phase started"         "generation=$NEW_GEN"
+
     if ! generation_guard_install; then
         log_error "Firewall" "Guard installation failed"             "generation=$NEW_GEN"
 
@@ -4237,11 +4333,14 @@ generation_switch_transaction() {
         return 1
     fi
 
+    debug_log "Timing" "Guard installation+verification completed"         "generation=$NEW_GEN elapsed=$(( $(date +%s) - ACTIVATION_TIMING_START ))s"
+
     if ! generation_guard_verify; then
         log_error "Firewall" "Guard verification failed"             "generation=$NEW_GEN"
         return 1
     fi
 
+    ACTIVATION_STEP_START=$(date +%s)
     if ! generation_install_active_ipv4 "$NEW4"; then
         log_error "Firewall" "IPv4 activation failed"             "generation=$NEW_GEN"
 
@@ -4259,6 +4358,9 @@ generation_switch_transaction() {
         return 1
     fi
 
+    debug_log "Timing" "IPv4 activation completed"         "generation=$NEW_GEN elapsed=$(( $(date +%s) - ACTIVATION_STEP_START ))s"
+
+    ACTIVATION_STEP_START=$(date +%s)
     if ! generation_install_active_ipv6 "$NEW6"; then
         log_error "Firewall" "IPv6 activation failed"             "generation=$NEW_GEN"
 
@@ -4275,6 +4377,10 @@ generation_switch_transaction() {
         log_error "Firewall" "Rollback verification failed"             "generation=$NEW_GEN"
         return 1
     fi
+
+    debug_log "Timing" "IPv6 activation completed"         "generation=$NEW_GEN elapsed=$(( $(date +%s) - ACTIVATION_STEP_START ))s"
+
+    ACTIVATION_STEP_START=$(date +%s)
 
     if [ "${TIRN_TEST_FAIL_ACTIVE_VERIFY:-0}" -eq 1 ]; then
         log_warn "Firewall" "TEST MODE — injected active generation verification failure"             "generation=$NEW_GEN"
@@ -4308,6 +4414,10 @@ generation_switch_transaction() {
         return 1
     fi
 
+    debug_log "Timing" "Active-rule verification completed"         "generation=$NEW_GEN elapsed=$(( $(date +%s) - ACTIVATION_STEP_START ))s"
+
+    ACTIVATION_STEP_START=$(date +%s)
+
     if ! generation_remove_legacy_dispatcher_rules ipv4 ||
        ! generation_remove_legacy_dispatcher_rules ipv6; then
         log_error "Firewall" "Dispatcher cleanup failed"             "generation=$NEW_GEN"
@@ -4325,6 +4435,10 @@ generation_switch_transaction() {
         log_error "Firewall" "Rollback verification failed"             "generation=$NEW_GEN"
         return 1
     fi
+
+    debug_log "Timing" "Legacy dispatcher cleanup completed"         "generation=$NEW_GEN elapsed=$(( $(date +%s) - ACTIVATION_STEP_START ))s"
+
+    ACTIVATION_STEP_START=$(date +%s)
 
     if [ "$RETAIN_OLD" -eq 1 ]; then
         log_info "Firewall" "Old generation retained"             "generation=$NEW_GEN old4=${OLD4:-none} old6=${OLD6:-none}"
@@ -4348,6 +4462,8 @@ generation_switch_transaction() {
             return 1
         fi
     fi
+
+    debug_log "Timing" "Old generation removal completed"         "generation=$NEW_GEN elapsed=$(( $(date +%s) - ACTIVATION_STEP_START ))s"
 
     if [ "$RETAIN_OLD" -eq 1 ]; then
         if ! generation_verify_retained_dispatcher_family "$NEW_GEN" "${OLD4#TIRNFW-G}" ipv4 ||
@@ -4476,6 +4592,8 @@ generation_switch_transaction() {
         fi
     fi
 
+    debug_log "Timing" "Activation phase completed"         "generation=$NEW_GEN elapsed=$(( $(date +%s) - ACTIVATION_TIMING_START ))s"
+
     log_info "Firewall" "Generation activated"         "generation=$NEW_GEN"
 
     return 0
@@ -4483,6 +4601,7 @@ generation_switch_transaction() {
 
 apply_dispatcher() {
     TMP_STATE="$DATA_DIR/network.state.tmp.$$"
+    CURRENT_STATE="$DATA_DIR/network.state.current.$$"
 
     if ! acquire_firewall_lock; then
         log_error "Network" "Dispatcher update failed" \
@@ -4490,29 +4609,97 @@ apply_dispatcher() {
         return 1
     fi
 
-    if ! build_network_state > "$TMP_STATE"; then
-        rm -f "$TMP_STATE"
+    if ! build_network_state > "$CURRENT_STATE"; then
+        rm -f "$TMP_STATE" "$CURRENT_STATE"
         release_firewall_lock
         log_error "Network" "State build failed"
         return 1
     fi
 
-    if [ ! -s "$TMP_STATE" ]; then
-        rm -f "$TMP_STATE"
+    if [ ! -s "$CURRENT_STATE" ]; then
+        rm -f "$TMP_STATE" "$CURRENT_STATE"
         release_firewall_lock
         log_warn "Network" "Dispatcher update skipped" \
             "current network state empty"
         return 1
     fi
 
+    if [ -f "$STATE_FILE" ] && [ -s "$STATE_FILE" ]; then
+        awk -F'|' '
+        NR == FNR {
+            if ($1 == "MOBILE") {
+                old_mobile[$2] = 1
+            } else if ($1 == "WLAN4") {
+                old_wlan4[$2] = 1
+            } else if ($1 == "WLAN6") {
+                old_wlan6[$2] = 1
+            }
+            next
+        }
+
+        {
+            if ($1 == "MOBILE") {
+                current_mobile[$2] = 1
+            } else if ($1 == "WLAN4") {
+                current_wlan4[$2] = 1
+            } else if ($1 == "WLAN6") {
+                current_wlan6[$2] = 1
+            } else if ($1 == "VPN") {
+                vpn[$0] = 1
+            }
+        }
+
+        END {
+            for (v in old_mobile)
+                mobile[v] = 1
+            for (v in current_mobile)
+                mobile[v] = 1
+
+            if (length(current_wlan4)) {
+                for (v in current_wlan4)
+                    wlan4[v] = 1
+            } else {
+                for (v in old_wlan4)
+                    wlan4[v] = 1
+            }
+
+            if (length(current_wlan6)) {
+                for (v in current_wlan6)
+                    wlan6[v] = 1
+            } else {
+                for (v in old_wlan6)
+                    wlan6[v] = 1
+            }
+
+            for (v in mobile)
+                print "MOBILE|" v
+            for (v in wlan4)
+                print "WLAN4|" v
+            for (v in wlan6)
+                print "WLAN6|" v
+            for (v in vpn)
+                print v
+        }' "$STATE_FILE" "$CURRENT_STATE" | sort -u > "$TMP_STATE"
+    else
+        cp -f "$CURRENT_STATE" "$TMP_STATE"
+    fi
+
+    if [ ! -s "$TMP_STATE" ]; then
+        rm -f "$TMP_STATE" "$CURRENT_STATE"
+        release_firewall_lock
+        log_warn "Network" "Dispatcher update skipped" \
+            "effective network state empty"
+        return 1
+    fi
+
     if [ -f "$STATE_FILE" ] && cmp -s "$TMP_STATE" "$STATE_FILE"; then
-        rm -f "$TMP_STATE"
+        rm -f "$TMP_STATE" "$CURRENT_STATE"
         release_firewall_lock
         return 0
     fi
 
     if network_generation_transaction "$TMP_STATE"; then
-        rm -f "$TMP_STATE"
+        rm -f "$TMP_STATE" "$CURRENT_STATE"
 
         release_firewall_lock
 
@@ -4521,7 +4708,7 @@ apply_dispatcher() {
         return 0
     fi
 
-    rm -f "$TMP_STATE"
+    rm -f "$TMP_STATE" "$CURRENT_STATE"
     release_firewall_lock
 
     log_error "Network" "Dispatcher update failed" \
@@ -5008,12 +5195,27 @@ log_info "Service" "Ready" "transactional firewall active"
 "$MODDIR/policy-watch.sh" "$POLICY_FILE:w" "$DATA_DIR:nm" >/dev/null 2>&1 &
 POLICY_WATCH_PID=$!
 
-start_app_watch
+trap 'rm -f "$NETWORK_EVENT_FILE" "$NETWORK_WATCH_FIFO" 2>/dev/null || true; kill "$NETWORK_WATCH_PID" "$POLICY_WATCH_PID" "$APP_WATCH_PID" 2>/dev/null || true; wait "$NETWORK_WATCH_PID" "$POLICY_WATCH_PID" "$APP_WATCH_PID" 2>/dev/null || true' EXIT INT TERM
 
-trap 'kill "$POLICY_WATCH_PID" "$APP_WATCH_PID" 2>/dev/null || true' EXIT INT TERM
+rm -f "$NETWORK_EVENT_FILE" 2>/dev/null || true
+
+start_app_watch
+start_network_watch
 
 while true; do
-    sleep "$POLL_INTERVAL"
+    WAITED=0
+
+    while [ "$WAITED" -lt "$POLL_INTERVAL" ]; do
+        if [ -f "$NETWORK_EVENT_FILE" ]; then
+            rm -f "$NETWORK_EVENT_FILE" 2>/dev/null || true
+            debug_log "Network Watcher" "Network event detected"                 "dispatcher wake-up"
+            break
+        fi
+
+        sleep 1
+        WAITED=$((WAITED + 1))
+    done
+
     ensure_app_watch_running
     process_app_events
     apply_dispatcher
