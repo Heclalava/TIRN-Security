@@ -2349,7 +2349,7 @@ bootstrap_fresh_install() {
         return 1
     fi
 
-    if ! refresh_apps_bootstrap; then
+    if ! refresh_apps_verified "bootstrap"; then
         release_firewall_lock
         log_error "Firewall" "Bootstrap failed" "app cache unavailable"
         return 1
