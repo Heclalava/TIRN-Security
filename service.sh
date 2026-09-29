@@ -3987,6 +3987,7 @@ policy_generation_transaction() {
             "generation=$NEW_GEN old=$OLD_GEN"
     fi
 
+    rm -f "$POLICY_STATE_ROLLBACK_TMP"
     return 0
 }
 
