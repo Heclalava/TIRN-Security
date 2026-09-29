@@ -3830,7 +3830,28 @@ policy_generation_transaction() {
 
     # Persistence is part of the transaction boundary. The old generation
     # must remain available until policy.applied has been committed.
-    if ! policy_state_transaction_commit "$PREPARED_POLICY"; then
+    if [ "${TIRN_DEV_MODE:-0}" -eq 1 ] &&
+       [ "${TIRN_TEST_FAIL_POLICY_STATE_COMMIT:-0}" -eq 1 ]; then
+
+        log_error "Firewall" "TEST FAULT" \
+            "forcing policy.applied commit failure"
+
+        POLICY_STATE_TEST_FAIL=1
+    else
+        POLICY_STATE_TEST_FAIL=0
+    fi
+
+    POLICY_STATE_ROLLBACK_TMP="$DATA_DIR/policy.applied.rollback.$$"
+
+    if ! cp -f "$POLICY_STATE_FILE" "$POLICY_STATE_ROLLBACK_TMP"; then
+        log_error "Firewall" \
+            "policy.applied rollback backup creation failed" \
+            "generation=$NEW_GEN"
+        return 1
+    fi
+
+    if [ "$POLICY_STATE_TEST_FAIL" -eq 1 ] ||
+       ! policy_state_transaction_commit "$PREPARED_POLICY"; then
 
         log_error "Firewall" \
             "policy.applied commit failed; restoring previous policy" \
@@ -3859,10 +3880,31 @@ policy_generation_transaction() {
         return 1
     fi
 
-    if ! cmp -s "$PREPARED_POLICY" "$POLICY_STATE_FILE"; then
+    if [ "${TIRN_DEV_MODE:-0}" -eq 1 ] &&
+       [ "${TIRN_TEST_FAIL_POLICY_STATE_VERIFY:-0}" -eq 1 ]; then
+
+        log_error "Firewall" "TEST FAULT" \
+            "forcing policy.applied verification failure"
+
+        POLICY_STATE_VERIFY_TEST_FAIL=1
+    else
+        POLICY_STATE_VERIFY_TEST_FAIL=0
+    fi
+
+    if [ "$POLICY_STATE_VERIFY_TEST_FAIL" -eq 1 ] ||
+       ! cmp -s "$PREPARED_POLICY" "$POLICY_STATE_FILE"; then
         log_error "Firewall" \
             "policy.applied verification failed after commit" \
             "generation=$NEW_GEN"
+
+        if [ -f "$POLICY_STATE_ROLLBACK_TMP" ]; then
+            if ! cp -f "$POLICY_STATE_ROLLBACK_TMP" "$POLICY_STATE_FILE"; then
+                log_error "Firewall" \
+                    "policy.applied rollback restore failed" \
+                    "generation=$NEW_GEN"
+                return 1
+            fi
+        fi
 
         if [ -n "$OLD_GEN" ]; then
             ROLLBACK_OK=1
