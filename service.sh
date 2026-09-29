@@ -12,14 +12,6 @@ IPTABLES="/system/bin/iptables"
 IP6TABLES="/system/bin/ip6tables"
 IP="/system/bin/ip"
 
-ipt() {
-    "$IPTABLES" -w 5 "$@"
-}
-
-ip6t() {
-    "$IP6TABLES" -w 5 "$@"
-}
-
 MAIN_CHAIN="TIRNFW"
 MOBILE_CHAIN="TIRNFW-MOBILE"
 WIFI_CHAIN="TIRNFW-WIFI"
@@ -252,52 +244,6 @@ generation_chain_exists() {
     "$1" -w 5 -S "$2" >/dev/null 2>&1
 }
 
-next_generation_id() {
-    MAX_GENERATION=0
-
-    for CHAIN in $(
-        "$IPTABLES" -w 5 -S 2>/dev/null |
-        sed -n 's/^-N TIRNFW-G\([0-9][0-9]*\)$/\1/p'
-    ); do
-        case "$CHAIN" in
-            ''|*[!0-9]*) ;;
-            *)
-                if [ "$CHAIN" -gt "$MAX_GENERATION" ] 2>/dev/null; then
-                    MAX_GENERATION="$CHAIN"
-                fi
-                ;;
-        esac
-    done
-
-    for CHAIN in $(
-        "$IP6TABLES" -w 5 -S 2>/dev/null |
-        sed -n 's/^-N TIRNFW-G\([0-9][0-9]*\)$/\1/p'
-    ); do
-        case "$CHAIN" in
-            ''|*[!0-9]*) ;;
-            *)
-                if [ "$CHAIN" -gt "$MAX_GENERATION" ] 2>/dev/null; then
-                    MAX_GENERATION="$CHAIN"
-                fi
-                ;;
-        esac
-    done
-
-    printf '%s\n' "$((MAX_GENERATION + 1))"
-}
-
-active_generation_ipv4() {
-    "$IPTABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
-        sed -n 's/^-A TIRNFW -j \(TIRNFW-G[0-9][0-9]*\)$/\1/p' |
-        head -n 1
-}
-
-active_generation_ipv6() {
-    "$IP6TABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
-        sed -n 's/^-A TIRNFW -j \(TIRNFW-G[0-9][0-9]*\)$/\1/p' |
-        head -n 1
-}
-
 
 generation_dispatcher_chain() {
     case "$1" in
@@ -308,18 +254,6 @@ generation_dispatcher_chain() {
             printf 'TIRNFW-G%s\n' "$1"
             ;;
     esac
-}
-
-generation_mobile_chain() {
-    printf 'TIRNFW-G%s-M\n' "$1"
-}
-
-generation_wifi_chain() {
-    printf 'TIRNFW-G%s-W\n' "$1"
-}
-
-generation_lan_chain() {
-    printf 'TIRNFW-G%s-L\n' "$1"
 }
 
 network_dispatcher_chain() {
@@ -831,112 +765,6 @@ EOF
 
 
 
-generation_verify_family() {
-    GEN="$1"
-    FAMILY="$2"
-
-    case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
-        *) return 1 ;;
-    esac
-
-    DISP="$(generation_dispatcher_chain "$GEN")"
-    MOB="$(generation_mobile_chain "$GEN")"
-    WIFI="$(generation_wifi_chain "$GEN")"
-    LAN="$(generation_lan_chain "$GEN")"
-
-    generation_chain_exists "$IPT" "$DISP" || return 1
-    generation_chain_exists "$IPT" "$MOB" || return 1
-    generation_chain_exists "$IPT" "$WIFI" || return 1
-    generation_chain_exists "$IPT" "$LAN" || return 1
-
-    DISP_RULES="$("$IPT" -w 5 -S "$DISP" 2>/dev/null)" || return 1
-    MOB_RULES="$("$IPT" -w 5 -S "$MOB" 2>/dev/null)" || return 1
-    WIFI_RULES="$("$IPT" -w 5 -S "$WIFI" 2>/dev/null)" || return 1
-    LAN_RULES="$("$IPT" -w 5 -S "$LAN" 2>/dev/null)" || return 1
-
-
-    # Every network policy chain must contain only TIRN-generated
-    # owner DROP rules followed by exactly one final RETURN.
-    for CHAIN in "$MOB" "$WIFI" "$LAN"; do
-        case "$CHAIN" in
-            "$MOB") CHAIN_RULES="$MOB_RULES" ;;
-            "$WIFI") CHAIN_RULES="$WIFI_RULES" ;;
-            "$LAN") CHAIN_RULES="$LAN_RULES" ;;
-            *) return 1 ;;
-        esac
-
-        RETURN_COUNT=0
-        LAST_RULE=""
-
-        while IFS= read -r RULE; do
-            [ -n "$RULE" ] || continue
-
-            case "$RULE" in
-                "-N $CHAIN")
-                    continue
-                    ;;
-                "-A $CHAIN -m owner --uid-owner "[0-9]*" -j DROP")
-                    ;;
-                "-A $CHAIN -j RETURN")
-                    RETURN_COUNT=$((RETURN_COUNT + 1))
-                    ;;
-                *)
-                    return 1
-                    ;;
-            esac
-
-            LAST_RULE="$RULE"
-        done <<EOF
-$CHAIN_RULES
-EOF
-
-        [ "$RETURN_COUNT" -eq 1 ] || return 1
-        [ "$LAST_RULE" = "-A $CHAIN -j RETURN" ] || return 1
-    done
-
-    # The generation dispatcher may contain only TIRN-owned
-    # classification rules and one final RETURN.
-    RETURN_COUNT=0
-    LAST_RULE=""
-
-    while IFS= read -r RULE; do
-        [ -n "$RULE" ] || continue
-
-        case "$RULE" in
-            "-N $DISP")
-                continue
-                ;;
-            "-A $DISP -o "*"-j $MOB")
-                ;;
-            "-A $DISP -o "*"-j $WIFI")
-                ;;
-            "-A $DISP -o "*"-j $LAN")
-                ;;
-            "-A $DISP -d "*"-o "*"-j $LAN")
-                ;;
-            "-A $DISP -d "*"-o "*"-j RETURN")
-                ;;
-            "-A $DISP -j RETURN")
-                RETURN_COUNT=$((RETURN_COUNT + 1))
-                ;;
-            *)
-                return 1
-                ;;
-        esac
-
-        LAST_RULE="$RULE"
-    done <<EOF
-$DISP_RULES
-EOF
-
-    [ "$RETURN_COUNT" -eq 1 ] || return 1
-    [ "$LAST_RULE" = "-A $DISP -j RETURN" ] || return 1
-
-    return 0
-}
-
 generation_guard_create() {
     if generation_chain_exists "$IPTABLES" "$GENERATION_GUARD_CHAIN"; then
         "$IPTABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" || return 1
@@ -1086,18 +914,6 @@ generation_guard_remove() {
     fi
 
     debug_log "Firewall" "Fail-closed guard removed"         "ipv4=absent ipv6=absent"
-
-    return 0
-}
-
-generation_guard_delete() {
-    generation_guard_remove || return 1
-
-    "$IPTABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" || return 1
-    "$IP6TABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" || return 1
-
-    "$IPTABLES" -w 5 -X "$GENERATION_GUARD_CHAIN" || return 1
-    "$IP6TABLES" -w 5 -X "$GENERATION_GUARD_CHAIN" || return 1
 
     return 0
 }
@@ -1464,63 +1280,6 @@ EOF
         case "$RULE" in
             "-A OUTPUT "*)
                 POSITION=$((POSITION + 1))
-                if [ "$RULE" = "-A OUTPUT -j $MAIN_CHAIN" ]; then
-                    COUNT=$((COUNT + 1))
-                    HOOK_POSITION="$POSITION"
-                fi
-                ;;
-        esac
-    done <<EOF
-$RULES
-EOF
-
-    [ "$COUNT" -eq 1 ] || return 1
-    [ "$HOOK_POSITION" -eq 1 ] || return 1
-
-    return 0
-}
-
-bootstrap_verify_existing_family() {
-    FAMILY="$1"
-
-    case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
-        *) return 1 ;;
-    esac
-
-    chain_exists "$IPT" "$MAIN_CHAIN" || return 1
-
-    RULES="$("$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
-
-    GEN="$(
-        printf '%s\n' "$RULES" |
-            sed -n 's/^-A TIRNFW -j \(TIRNFW-G[0-9][0-9]*\)$/\1/p' |
-            head -n 1
-    )"
-
-    [ -n "$GEN" ] || return 1
-
-    generation_verify_family "$GEN" "$FAMILY" || return 1
-
-    RULES="$("$IPT" -w 5 -S OUTPUT 2>/dev/null)" || return 1
-    COUNT=0
-    POSITION=0
-    HOOK_POSITION=0
-
-    while IFS= read -r RULE; do
-        [ -n "$RULE" ] || continue
-
-        case "$RULE" in
-            "-N OUTPUT")
-                continue
-                ;;
-        esac
-
-        case "$RULE" in
-            "-A OUTPUT "*)
-                POSITION=$((POSITION + 1))
-
                 if [ "$RULE" = "-A OUTPUT -j $MAIN_CHAIN" ]; then
                     COUNT=$((COUNT + 1))
                     HOOK_POSITION="$POSITION"
