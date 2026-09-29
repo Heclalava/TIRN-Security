@@ -988,6 +988,15 @@ button{color:inherit}
   </div>
 </div>
 
+<div id="staleImportCompleteBack" class="modal-back" onclick="if(event.target===this)hideStaleImportCompleteModal()">
+  <div class="modal import-complete-modal">
+    <h2>Stale policy processing completed</h2>
+    <p id="staleImportCompleteSummary"></p>
+    <div id="staleImportCompleteRules" class="stale-import-rules"></div>
+    <button type="button" onclick="hideStaleImportCompleteModal()">Close</button>
+  </div>
+</div>
+
 <div id="staleImportBack" class="modal-back" onclick="if(event.target===this)hideStaleImportModal()">
   <div class="modal stale-import-modal">
     <div class="stale-import-head">
@@ -2555,13 +2564,7 @@ async function finishStaleImportIfDone(){
 
     hideImportProcessingModal();
     setTaskStatus("READY");
-    toast(
-      "Stale policy rules processed: "+
-      c.accepted+
-      " reassigned, "+
-      c.rejected+
-      " rejected."
-    );
+    showStaleImportCompleteModal();
   }catch(e){
     console.error(
       "TIRN Security stale policy reconciliation failed:",
@@ -2756,6 +2759,73 @@ function closeImportProcessingFailure(){
 
 function hideImportProcessingModal(){
   document.getElementById("importProcessingBack").style.display="none";
+}
+
+function showStaleImportCompleteModal(){
+  const summary=document.getElementById(
+    "staleImportCompleteSummary"
+  );
+
+  const rules=document.getElementById(
+    "staleImportCompleteRules"
+  );
+
+  const c=staleImportCounts();
+
+  const completedItems=staleImportItems.map(item=>({
+    ...item
+  }));
+
+  summary.textContent=
+    c.remaining+
+    " remaining · "+
+    c.accepted+
+    " accepted · "+
+    c.rejected+
+    " rejected";
+
+  rules.innerHTML="";
+
+  completedItems.forEach(item=>{
+    const row=document.createElement("div");
+    row.className="stale-import-rule";
+
+    const title=document.createElement("div");
+    title.className="stale-import-rule-title";
+    title.textContent=item.name;
+
+    const detail=document.createElement("div");
+    detail.className="stale-import-rule-detail";
+
+    detail.textContent=
+      "User "+
+      item.user+
+      " · UID "+
+      item.uid+
+      " · Networks: "+
+      item.networks.join(", ")+
+      " · Package: "+
+      item.pkg+
+      (
+        item.state==="rejected"
+        ? " · Rejected"
+        : " · Accepted & reassigned"
+      );
+
+    row.appendChild(title);
+    row.appendChild(detail);
+    rules.appendChild(row);
+  });
+
+  document.getElementById(
+    "staleImportCompleteBack"
+  ).style.display="flex";
+}
+
+function hideStaleImportCompleteModal(){
+  document.getElementById(
+    "staleImportCompleteBack"
+  ).style.display="none";
 }
 
 function showImportCompleteModal(total){
