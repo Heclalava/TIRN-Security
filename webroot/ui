@@ -2518,10 +2518,12 @@ async function finishStaleImportIfDone(){
   }
 
   staleImportCommitStarted=true;
+
+  hideStaleImportModal();
+
   staleImportBusy=true;
   renderStaleImportRules();
 
-  hideStaleImportModal();
   setTaskStatus("UPDATING");
   const reconciliationMode=staleImportMode==="audit";
   showImportProcessingModal(
