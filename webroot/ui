@@ -961,6 +961,19 @@ button{color:inherit}
   </div>
 </div>
 
+<div id="clearPendingBack" class="modal-back" onclick="if(event.target===this)hideClearPendingModal()">
+  <div class="modal">
+    <h2>Policy cleared</h2>
+    <p>
+      All firewall rules have been removed from the pending policy.
+    </p>
+    <p>
+      Click "APPLY rules" to activate this change.
+    </p>
+    <button type="button" onclick="hideClearPendingModal()">Close</button>
+  </div>
+</div>
+
 <div id="bulkMatrixEditCompleteBack" class="modal-back" onclick="if(event.target===this)hideBulkMatrixEditCompleteModal()">
   <div class="modal import-complete-modal">
     <h2>Bulk app matrix edit completed</h2>
@@ -2883,6 +2896,18 @@ function hideBulkMatrixEditCompleteModal(){
   ).style.display="none";
 }
 
+function showClearPendingModal(){
+  document.getElementById(
+    "clearPendingBack"
+  ).style.display="flex";
+}
+
+function hideClearPendingModal(){
+  document.getElementById(
+    "clearPendingBack"
+  ).style.display="none";
+}
+
 function showClearConfirm(){
   document.getElementById("clearConfirmBack").style.display="flex";
 }
@@ -2980,7 +3005,7 @@ async function confirmClearAll(){
   updatePendingBar();
   render();
 
-  toast("Policy cleared. Press APPLY RULES to activate.");
+  showClearPendingModal();
 }
 
 async function init(){
