@@ -1886,9 +1886,23 @@ async function downloadLogs(){
 
     const blob=await response.blob();
     const url=URL.createObjectURL(blob);
+
+    let filename="TIRN-security-report.zip";
+    const disposition=response.headers.get("Content-Disposition");
+
+    if(disposition){
+      const match=disposition.match(
+        /filename="([^"]+)"/
+      );
+
+      if(match){
+        filename=match[1];
+      }
+    }
+
     const a=document.createElement("a");
     a.href=url;
-    a.removeAttribute("download");
+    a.download=filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
