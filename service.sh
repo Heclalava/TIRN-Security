@@ -1197,9 +1197,9 @@ EOF
     [ "$RETURN_COUNT" -eq 1 ] || return 1
     [ "$OTHER_COUNT" -eq 0 ] || return 1
 
-    FIRST_RULE="$(printf '%s\n' "$RULES" | sed -n '2p')"
-    SECOND_RULE="$(printf '%s\n' "$RULES" | sed -n '3p')"
-    THIRD_RULE="$(printf '%s\n' "$RULES" | sed -n '4p')"
+    FIRST_RULE="$(printf '%s\n' "$RULES" | sed -n '1p')"
+    SECOND_RULE="$(printf '%s\n' "$RULES" | sed -n '2p')"
+    THIRD_RULE="$(printf '%s\n' "$RULES" | sed -n '3p')"
 
     [ "$FIRST_RULE" = "-A $MAIN_CHAIN -o lo -j RETURN" ] || return 1
     [ "$SECOND_RULE" = "-A $MAIN_CHAIN -j DROP" ] || return 1
@@ -1453,6 +1453,175 @@ prepare_policy() {
     log_info "Policy" "Prepared" "rules=$PREPARED_RULE_COUNT"
     return 0
 }
+validate_policy_applied_file() {
+    POLICY_SOURCE="$1"
+
+    awk -F'|' '
+        {
+            if ($0 ~ /^[[:space:]]*#/)
+                next
+
+            if ($0 ~ /^[[:space:]]*$/)
+                next
+
+            if (NF != 5)
+                exit 2
+
+            if ($1 !~ /^[0-9]+$/ || $1 > 2147483647)
+                exit 2
+
+            if ($2 !~ /^[A-Za-z0-9._-]+$/)
+                exit 2
+
+            if ($3 !~ /^[0-9]+$/ || $3 < 1 || $3 > 2147483647)
+                exit 2
+
+            if ($4 != "MOBILE" &&
+                $4 != "WIFI" &&
+                $4 != "LAN")
+                exit 2
+
+            if ($5 != "BLOCK")
+                exit 2
+        }
+    ' "$POLICY_SOURCE"
+}
+
+validate_policy_conf_file() {
+    POLICY_SOURCE="$1"
+
+    awk -F'|' '
+        {
+            if ($0 ~ /^[[:space:]]*#/)
+                next
+
+            if ($0 ~ /^[[:space:]]*$/)
+                next
+
+            if (NF != 5)
+                exit 2
+
+            if ($1 !~ /^[0-9]+$/ || $1 > 2147483647)
+                exit 2
+
+            if ($2 !~ /^[A-Za-z0-9._-]+$/)
+                exit 2
+
+            if ($3 !~ /^[0-9]+$/ || $3 < 1 || $3 > 2147483647)
+                exit 2
+
+            if ($4 != "MOBILE" &&
+                $4 != "WIFI" &&
+                $4 != "LAN")
+                exit 2
+
+            if ($5 != "BLOCK")
+                exit 2
+        }
+
+        END {
+            if (NR == 0)
+                exit 2
+        }
+    ' "$POLICY_SOURCE"
+
+    return $?
+}
+
+
+recover_boot_policy_state() {
+
+    POLICY_APPLIED_VALID=0
+    POLICY_CONF_VALID=0
+
+    if [ -f "$POLICY_STATE_FILE" ] &&
+       validate_policy_applied_file "$POLICY_STATE_FILE"; then
+        POLICY_APPLIED_VALID=1
+    fi
+
+    if [ -f "$POLICY_FILE" ]; then
+        validate_policy_conf_file "$POLICY_FILE"
+        POLICY_CONF_RESULT=$?
+
+        if [ "$POLICY_CONF_RESULT" -eq 0 ]; then
+            POLICY_CONF_VALID=1
+        fi
+    fi
+
+    if [ "$POLICY_APPLIED_VALID" -eq 1 ] &&
+       [ "$POLICY_CONF_VALID" -eq 1 ]; then
+        return 0
+    fi
+
+    if [ "$POLICY_APPLIED_VALID" -eq 1 ]; then
+        log_warn "Policy" "policy.conf invalid" \
+            "rebuilding from policy.applied"
+
+        if ! cp -f "$POLICY_STATE_FILE" "$POLICY_FILE"; then
+            log_error "Policy" "Recovery failed" \
+                "unable to rebuild policy.conf"
+            return 1
+        fi
+
+        chmod 600 "$POLICY_FILE" || return 1
+
+        return 0
+    fi
+
+    if [ "$POLICY_CONF_VALID" -eq 1 ]; then
+        log_warn "Policy" "policy.applied invalid" \
+            "rebuilding from policy.conf"
+
+        RECOVERY_POLICY="$DATA_DIR/policy.recovery.prepare.$$"
+        RECOVERY_COUNT="$DATA_DIR/policy.recovery.count.$$"
+        RECOVERY_STATE="$DATA_DIR/policy.applied.recovery.$$"
+
+        rm -f "$RECOVERY_POLICY" "$RECOVERY_COUNT" "$RECOVERY_STATE"
+
+        if ! prepare_policy \
+            "$RECOVERY_POLICY" \
+            "$RECOVERY_COUNT" \
+            "$POLICY_FILE"; then
+            rm -f "$RECOVERY_POLICY" "$RECOVERY_COUNT"
+            return 1
+        fi
+
+        if ! cp -f "$RECOVERY_POLICY" "$RECOVERY_STATE"; then
+            rm -f "$RECOVERY_POLICY" "$RECOVERY_COUNT" "$RECOVERY_STATE"
+            return 1
+        fi
+
+        chmod 600 "$RECOVERY_STATE" || return 1
+
+        if ! mv -f "$RECOVERY_STATE" "$POLICY_STATE_FILE"; then
+            rm -f "$RECOVERY_STATE"
+            return 1
+        fi
+
+        rm -f "$RECOVERY_POLICY" "$RECOVERY_COUNT"
+
+        return 0
+    fi
+
+    log_warn "Policy" "Both policy states invalid" \
+        "creating empty recovery state"
+
+    if ! : > "$POLICY_FILE"; then
+        return 1
+    fi
+
+    chmod 600 "$POLICY_FILE" || return 1
+
+    if ! : > "$POLICY_STATE_FILE"; then
+        return 1
+    fi
+
+    chmod 600 "$POLICY_STATE_FILE" || return 1
+
+    return 0
+}
+
+
 prepare_applied_policy_for_boot() {
     PREPARED_POLICY="$1"
     PREPARED_COUNT="$2"
@@ -1528,9 +1697,25 @@ prepare_applied_policy_for_boot() {
         }
     ' "$POLICY_SOURCE" > "$TMP_NORMALIZED"; then
         rm -f "$TMP_PREPARED" "$TMP_NORMALIZED"
-        log_error "Policy" "Boot policy preparation failed" \
-            "policy.applied validation failed"
-        return 1
+
+        log_error "Policy" "Boot policy invalid" \
+            "entering empty-policy recovery"
+
+        : > "$TMP_PREPARED"
+
+        if ! mv -f "$TMP_PREPARED" "$PREPARED_POLICY"; then
+            rm -f "$TMP_PREPARED"
+            log_error "Policy" "Boot policy recovery failed" \
+                "unable to create empty prepared policy"
+            return 1
+        fi
+
+        printf "0\n" > "$PREPARED_COUNT"
+
+        log_info "Policy" "Boot policy recovered" \
+            "rules=0 source=empty recovery"
+
+        return 0
     fi
 
     if ! sort -u "$TMP_NORMALIZED" > "$TMP_PREPARED"; then
@@ -1904,6 +2089,13 @@ bootstrap_existing_install() {
         release_firewall_lock
         log_error "Firewall" "Existing install bootstrap failed" \
             "persisted network.state missing or empty"
+        return 1
+    fi
+
+    if ! recover_boot_policy_state; then
+        release_firewall_lock
+        log_error "Firewall" "Existing install bootstrap failed" \
+            "policy recovery unavailable"
         return 1
     fi
 
