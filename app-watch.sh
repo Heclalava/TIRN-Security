@@ -21,7 +21,6 @@ MKDIR="/system/bin/mkdir"
 LOG="$DATA_DIR/service.log"
 DEBUG_LOG="$DATA_DIR/debug.log"
 LOCK="$DATA_DIR/app-watch.lock"
-EVENT_DIR="$DATA_DIR/app-watch-events"
 APP_EVENT_QUEUE="$DATA_DIR/app-events"
 
 DEBOUNCE=2
@@ -32,15 +31,6 @@ DEBUG_LOG="$DEBUG_LOG"
 
 mkdir -p "$DATA_DIR" || exit 1
 chmod 700 "$DATA_DIR"
-
-if ! "$MKDIR" "$EVENT_DIR" 2>/dev/null; then
-    if [ ! -d "$EVENT_DIR" ]; then
-        log_error "App Watcher" "Startup failed" "unable to create event directory"
-        exit 1
-    fi
-fi
-
-chmod 700 "$EVENT_DIR"
 
 if ! "$MKDIR" "$APP_EVENT_QUEUE" 2>/dev/null; then
     if [ ! -d "$APP_EVENT_QUEUE" ]; then
@@ -61,8 +51,8 @@ cleanup() {
         kill "$LOGCAT_PID" 2>/dev/null
     fi
 
-    "$RM" -f "$EVENT_DIR"/.watch.* 2>/dev/null
-    "$RM" -f "$EVENT_DIR"/.work.* 2>/dev/null
+    "$RM" -f "$APP_EVENT_QUEUE"/.watch.* 2>/dev/null
+    "$RM" -f "$APP_EVENT_QUEUE"/.work.* 2>/dev/null
     "$RM" -rf "$LOCK" 2>/dev/null
 }
 
@@ -144,8 +134,8 @@ queue_event() {
             ;;
     esac
 
-    EVENT_FILE="$EVENT_DIR/$PACKAGE"
-    EVENT_TMP="$EVENT_DIR/.event.$$"
+    EVENT_FILE="$APP_EVENT_QUEUE/$PACKAGE"
+    EVENT_TMP="$APP_EVENT_QUEUE/.event.$$"
 
     OLD_ACTION=""
     if [ -f "$EVENT_FILE" ]; then
@@ -360,7 +350,7 @@ process_event_file() {
         return 0
     fi
 
-    WORK_FILE="$EVENT_DIR/.work.$$"
+    WORK_FILE="$APP_EVENT_QUEUE/.work.$$"
     if ! "$MV" -f "$EVENT_FILE" "$WORK_FILE" 2>/dev/null; then
         return 0
     fi
@@ -418,8 +408,8 @@ process_event_file() {
     fi
 
     PROCESS_FAILED=0
-    USERS_FILE="$EVENT_DIR/.users.$$"
-    RETRY_FILE="$EVENT_DIR/.retry.$$"
+    USERS_FILE="$APP_EVENT_QUEUE/.users.$$"
+    RETRY_FILE="$APP_EVENT_QUEUE/.retry.$$"
 
     : > "$RETRY_FILE" || {
         "$RM" -f "$RETRY_FILE"
@@ -488,7 +478,7 @@ process_event_file() {
                 ;;
         esac
 
-        RETRY_TMP="$EVENT_DIR/.retry-event.$$"
+        RETRY_TMP="$APP_EVENT_QUEUE/.retry-event.$$"
 
         printf '%s|%s|%s\n' \
             "$RETRY_ACTION" \
@@ -566,7 +556,7 @@ while true
 do
     FOUND=0
 
-    for EVENT_FILE in "$EVENT_DIR"/*
+    for EVENT_FILE in "$APP_EVENT_QUEUE"/*
     do
         [ -f "$EVENT_FILE" ] || continue
         case "${EVENT_FILE##*/}" in
