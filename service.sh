@@ -3843,6 +3843,10 @@ policy_generation_transaction() {
 
     POLICY_STATE_ROLLBACK_TMP="$DATA_DIR/policy.applied.rollback.$$"
 
+    cleanup_policy_state_rollback_tmp() {
+        rm -f "$POLICY_STATE_ROLLBACK_TMP"
+    }
+
     if ! cp -f "$POLICY_STATE_FILE" "$POLICY_STATE_ROLLBACK_TMP"; then
         log_error "Firewall" \
             "policy.applied rollback backup creation failed" \
@@ -3987,7 +3991,7 @@ policy_generation_transaction() {
             "generation=$NEW_GEN old=$OLD_GEN"
     fi
 
-    rm -f "$POLICY_STATE_ROLLBACK_TMP"
+    cleanup_policy_state_rollback_tmp
     return 0
 }
 
