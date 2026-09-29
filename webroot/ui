@@ -2931,7 +2931,7 @@ async function confirmClearLogs(){
   setTaskStatus("CLEARING LOG");
 
   try{
-    await api(clearLogTarget==="debug"?"/logs-clear-debug":"/logs-clear-system");
+    await api(clearLogTarget==="debug"?"/cgi-bin/logs-clear-debug":"/cgi-bin/logs-clear-system");
     title.textContent=label+" cleared";
     message.textContent="TIRN Security "+label+" was cleared successfully.";
     error.textContent="";
