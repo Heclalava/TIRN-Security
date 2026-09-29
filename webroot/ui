@@ -926,22 +926,22 @@ button{color:inherit}
 
 <input id="importFile" type="file" accept=".json,application/json" hidden onchange="importBackup(this.files[0])"/>
 
-<div id="bulkProgressBack" class="modal-back" style="z-index:110">
+<div id="appRefreshProgressBack" class="modal-back" style="z-index:110">
   <div class="modal bulk-progress-modal">
     <div class="bulk-progress-head">
-      <h2 id="bulkProgressTitle">Updating policy</h2>
-      <span id="bulkProgressState" class="bulk-progress-state">RUNNING</span>
+      <h2 id="appRefreshProgressTitle">Refreshing app cache</h2>
+      <span id="appRefreshProgressState" class="bulk-progress-state">RUNNING</span>
     </div>
-    <p id="bulkProgressStatus">Applying TIRN Security policy changes…</p>
+    <p id="appRefreshProgressStatus">Refreshing application cache…</p>
     <div class="bulk-progress-track">
-      <div id="bulkProgressBar" class="bulk-progress-bar"></div>
+      <div id="appRefreshProgressBar" class="bulk-progress-bar"></div>
     </div>
     <div class="bulk-progress-meta">
-      <span id="bulkProgressCount">0 / 0</span>
-      <span id="bulkProgressPercent">0%</span>
+      <span id="appRefreshProgressCount">0 / 0</span>
+      <span id="appRefreshProgressPercent">0%</span>
     </div>
-    <p id="bulkProgressError" class="bulk-progress-error"></p>
-    <button id="bulkProgressClose" onclick="hideBulkProgress()" disabled>Close</button>
+    <p id="appRefreshProgressError" class="bulk-progress-error"></p>
+    <button id="appRefreshProgressClose" onclick="hideAppRefreshProgress()" disabled>Close</button>
   </div>
 </div>
 
@@ -958,6 +958,17 @@ button{color:inherit}
     <h2>Policy applied successfully</h2>
     <p>Your firewall policy changes have been applied successfully.</p>
     <button type="button" onclick="hidePolicyApplyCompleteModal()">Close</button>
+  </div>
+</div>
+
+<div id="bulkMatrixEditCompleteBack" class="modal-back" onclick="if(event.target===this)hideBulkMatrixEditCompleteModal()">
+  <div class="modal import-complete-modal">
+    <h2>Bulk app matrix edit completed</h2>
+    <p id="bulkMatrixEditCompleteSummary">
+      The selected application rules have been updated in the app matrix.
+      Press APPLY RULES to activate the firewall changes.
+    </p>
+    <button type="button" onclick="hideBulkMatrixEditCompleteModal()">Close</button>
   </div>
 </div>
 
@@ -1427,7 +1438,7 @@ async function refreshAppsList(){
 async function refreshAppCache(){
   if(writeBusy)return;
   writeBusy=true;
-  showBulkProgress("Refresh app cache",0);
+  showAppRefreshProgress("Refresh app cache",0);
   try{
     const data=await api("/refresh-apps",{method:"POST"});
     if(!data || data.status!=="OK"){
@@ -1444,22 +1455,22 @@ async function refreshAppCache(){
         const processed=Number(progress.processed)||0;
         const total=Number(progress.total)||0;
         if(progress.status==="RUNNING"){
-          const state=document.getElementById("bulkProgressState");
-          const status=document.getElementById("bulkProgressStatus");
+          const state=document.getElementById("appRefreshProgressState");
+          const status=document.getElementById("appRefreshProgressStatus");
           state.textContent="RUNNING";
           state.className="bulk-progress-state";
           status.textContent="Refreshing application cache…";
         }
-        updateBulkProgress(processed,total);
+        updateAppRefreshProgress(processed,total);
       }else if(progress.status==="IDLE"){
-        const state=document.getElementById("bulkProgressState");
-        const status=document.getElementById("bulkProgressStatus");
+        const state=document.getElementById("appRefreshProgressState");
+        const status=document.getElementById("appRefreshProgressStatus");
         state.textContent="PREPARING";
         state.className="bulk-progress-state";
         status.textContent="Preparing application cache…";
-        document.getElementById("bulkProgressCount").textContent="Preparing…";
-        document.getElementById("bulkProgressPercent").textContent="—";
-        document.getElementById("bulkProgressBar").style.width="0%";
+        document.getElementById("appRefreshProgressCount").textContent="Preparing…";
+        document.getElementById("appRefreshProgressPercent").textContent="—";
+        document.getElementById("appRefreshProgressBar").style.width="0%";
       }
 
       if(progress.status==="COMPLETE")break;
@@ -1474,10 +1485,10 @@ async function refreshAppCache(){
       appRevision=String(revisionData.revision);
     }
 
-    finishBulkProgress(true,"App cache refreshed");
+    finishAppRefreshProgress(true,"App cache refreshed");
   }catch(e){
     console.error("TIRN Security app cache refresh failed:",e);
-    finishBulkProgress(false,"App cache refresh failed","REFRESH_ERROR");
+    finishAppRefreshProgress(false,"App cache refresh failed","REFRESH_ERROR");
   }finally{
     writeBusy=false;
   }
@@ -1751,15 +1762,12 @@ async function bulkNetwork(n,action){
 
   const block=action==="BLOCK";
   const total=rows.length;
-  const label=(block?"Block ":"Allow ")+n;
 
   writeBusy=true;
-  showBulkProgress(label,total);
-
-  let done=0;
 
   try{
     for(const a of rows){
+
       const key=
         String(a.user)+"|"+
         String(a.pkg)+"|"+
@@ -1771,20 +1779,31 @@ async function bulkNetwork(n,action){
       }else{
         policy.delete(key);
       }
-
-      done++;
-      updateBulkProgress(done,total);
     }
 
     updateRuleCount();
     policySignature=getPolicySignature();
     updatePendingBar();
     render();
-    finishBulkProgress(true,label+" complete","");
-    toast("Policy updated");
+
+    showBulkMatrixEditCompleteModal(
+      (block?"Blocked ":"Allowed ")+
+      n+
+      " for "+
+      total+
+      " application"+
+      (total===1?"":"s")+
+      " in the app matrix. Press APPLY RULES to activate."
+    );
+
   }catch(e){
-    finishBulkProgress(false,"Bulk policy edit failed","PF-BULK-005");
-    toast("Bulk update failed");
+    console.error(
+      "TIRN Security bulk policy edit failed:",
+      e
+    );
+
+    toast("Bulk app matrix edit failed");
+
   }finally{
     writeBusy=false;
     updatePendingBar();
@@ -1816,33 +1835,6 @@ async function readEngine(){
     el.textContent="ENGINE ?";
     el.className="bad";
     throw e;
-  }
-}
-
-async function refreshAll(){
-  if(writeBusy){
-    toast("Policy update in progress");
-    return;
-  }
-
-  if(hasPendingPolicyChanges()){
-    toast("Apply pending policy changes first");
-    return;
-  }
-
-  toast("Refreshing…");
-
-  try{
-    await loadPolicy();
-    await loadApps();
-    await readNetwork();
-    await readEngine();
-    render();
-    toast("Refreshed");
-  }catch(e){
-    document.getElementById("list").innerHTML=
-      '<div class="empty">TIRN Security CGI unavailable</div>';
-    toast("Refresh failed");
   }
 }
 
@@ -2634,12 +2626,12 @@ async function clearAll(){
 
 let importWaitTimer=null;
 
-function showBulkProgress(title,total){
+function showAppRefreshProgress(title,total){
   setTaskStatus(title==="Import policy"?"IMPORTING":title==="Refresh app cache"?"REFRESHING":"UPDATING");
-  const back=document.getElementById("bulkProgressBack");
-  const state=document.getElementById("bulkProgressState");
-  const close=document.getElementById("bulkProgressClose");
-  const status=document.getElementById("bulkProgressStatus");
+  const back=document.getElementById("appRefreshProgressBack");
+  const state=document.getElementById("appRefreshProgressState");
+  const close=document.getElementById("appRefreshProgressClose");
+  const status=document.getElementById("appRefreshProgressStatus");
   const track=document.querySelector(".bulk-progress-track");
   const meta=document.querySelector(".bulk-progress-meta");
 
@@ -2648,7 +2640,7 @@ function showBulkProgress(title,total){
     importWaitTimer=null;
   }
 
-  document.getElementById("bulkProgressTitle").textContent=title;
+  document.getElementById("appRefreshProgressTitle").textContent=title;
   const preparing=title==="Refresh app cache";
   const importing=title==="Import policy";
 
@@ -2663,34 +2655,34 @@ function showBulkProgress(title,total){
       status.textContent="Please wait"+".".repeat(dots);
     },500);
   }else{
-    status.textContent=preparing?"Preparing application cache…":"Applying TIRN Security policy changes…";
+    status.textContent=preparing?"Preparing application cache…":"Refreshing application cache…";
     track.style.display="block";
     meta.style.display="flex";
-    document.getElementById("bulkProgressBar").style.width="0%";
-    document.getElementById("bulkProgressCount").textContent=preparing?"Preparing…":"0 / "+total;
-    document.getElementById("bulkProgressPercent").textContent=preparing?"—":"0%";
+    document.getElementById("appRefreshProgressBar").style.width="0%";
+    document.getElementById("appRefreshProgressCount").textContent=preparing?"Preparing…":"0 / "+total;
+    document.getElementById("appRefreshProgressPercent").textContent=preparing?"—":"0%";
   }
 
-  document.getElementById("bulkProgressError").textContent="";
-  document.getElementById("bulkProgressError").classList.remove("show");
+  document.getElementById("appRefreshProgressError").textContent="";
+  document.getElementById("appRefreshProgressError").classList.remove("show");
   state.textContent=preparing?"PREPARING":"RUNNING";
   state.className="bulk-progress-state";
   close.disabled=true;
   back.style.display="flex";
 }
 
-function updateBulkProgress(done,total){
+function updateAppRefreshProgress(done,total){
   const percent=total?Math.round((done/total)*100):100;
-  document.getElementById("bulkProgressBar").style.width=percent+"%";
-  document.getElementById("bulkProgressCount").textContent=done+" / "+total;
-  document.getElementById("bulkProgressPercent").textContent=percent+"%";
+  document.getElementById("appRefreshProgressBar").style.width=percent+"%";
+  document.getElementById("appRefreshProgressCount").textContent=done+" / "+total;
+  document.getElementById("appRefreshProgressPercent").textContent=percent+"%";
 }
 
-function finishBulkProgress(success,message,code){
-  const state=document.getElementById("bulkProgressState");
-  const close=document.getElementById("bulkProgressClose");
-  const status=document.getElementById("bulkProgressStatus");
-  const error=document.getElementById("bulkProgressError");
+function finishAppRefreshProgress(success,message,code){
+  const state=document.getElementById("appRefreshProgressState");
+  const close=document.getElementById("appRefreshProgressClose");
+  const status=document.getElementById("appRefreshProgressStatus");
+  const error=document.getElementById("appRefreshProgressError");
   const importing=!!importWaitTimer;
 
   if(importWaitTimer){
@@ -2707,7 +2699,7 @@ function finishBulkProgress(success,message,code){
     setTaskStatus("READY");
 
     if(importing){
-      document.getElementById("bulkProgressBack").style.display="none";
+      document.getElementById("appRefreshProgressBack").style.display="none";
       return;
     }
   }else{
@@ -2718,9 +2710,9 @@ function finishBulkProgress(success,message,code){
   close.disabled=false;
 }
 
-function hideBulkProgress(){
+function hideAppRefreshProgress(){
   if(writeBusy)return;
-  document.getElementById("bulkProgressBack").style.display="none";
+  document.getElementById("appRefreshProgressBack").style.display="none";
 }
 
 function showImportProcessingModal(title,text){
@@ -2787,6 +2779,22 @@ function showPolicyApplyCompleteModal(){
 
 function hidePolicyApplyCompleteModal(){
   document.getElementById("policyApplyCompleteBack").style.display="none";
+}
+
+function showBulkMatrixEditCompleteModal(message){
+  document.getElementById(
+    "bulkMatrixEditCompleteSummary"
+  ).textContent=message;
+
+  document.getElementById(
+    "bulkMatrixEditCompleteBack"
+  ).style.display="flex";
+}
+
+function hideBulkMatrixEditCompleteModal(){
+  document.getElementById(
+    "bulkMatrixEditCompleteBack"
+  ).style.display="none";
 }
 
 function showClearConfirm(){
@@ -2880,12 +2888,13 @@ async function confirmClearAll(){
 
   policyRequestGeneration++;
   policy.clear();
+
   updateRuleCount();
   policySignature=getPolicySignature();
   updatePendingBar();
   render();
 
-  await applyPendingPolicy();
+  toast("Policy cleared. Press APPLY RULES to activate.");
 }
 
 async function init(){
