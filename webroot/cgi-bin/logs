@@ -96,7 +96,8 @@ done
 [ -s "$ARCHIVE" ] || exit 1
 
 printf '%s\n' 'Content-Type: application/zip'
-STAMP=$(date '+%Y%m%d-%H%M'); printf '%s\n' "Content-Disposition: attachment; filename=\"TIRN-security-report-$STAMP.zip\""
+STAMP=$(date '+%Y%m%d-%H%M')
+printf '%s\n' "Content-Disposition: attachment; filename=\"TIRN-security-report-$STAMP.zip\"; filename*=UTF-8''TIRN-security-report-$STAMP.zip"
 printf '%s\n' 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0'
 printf '%s\n' 'Pragma: no-cache'
 printf '%s\n' 'Expires: 0'
