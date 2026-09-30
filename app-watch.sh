@@ -232,27 +232,38 @@ process_logcat_line() {
             ;;
     esac
 
-    if [ -f "$APPS_IDENTITY" ]; then
-        "$AWK" -F'|' -v p="$EVENT_PACKAGE" '
-            NF == 3 && $2 == p {
-                print $1
-            }
-        ' "$APPS_IDENTITY" |
-        "$SORT" -nu |
-        while IFS= read -r USER
-        do
-            [ -n "$USER" ] || continue
+    case "$EVENT_ACTION" in
+        ADDED|REPLACED)
+            "$PM" list users 2>/dev/null |
+            "$SED" -n 's/.*UserInfo{\([0-9][0-9]*\):.*/\1/p' |
+            "$SORT" -nu |
+            while IFS= read -r USER
+            do
+                [ -n "$USER" ] || continue
 
-            debug_log "App Watcher" "ADDED identity match" \
-                "action=$EVENT_ACTION user=$USER package=$EVENT_PACKAGE"
+                if "$PM" list packages --user "$USER" -U "$EVENT_PACKAGE" 2>/dev/null |
+                    "$AWK" -v p="$EVENT_PACKAGE" '
+                        $1 == ("package:" p) && $2 ~ /^uid:[0-9]+$/ {
+                            found=1
+                            exit
+                        }
+                        END {
+                            exit(found ? 0 : 1)
+                        }
+                    '
+                then
+                    debug_log "App Watcher" "ADDED identity resolved" \
+                        "action=$EVENT_ACTION user=$USER package=$EVENT_PACKAGE"
 
-            queue_event "$EVENT_ACTION" "$USER" "$EVENT_PACKAGE"
-            QUEUE_STATUS=$?
+                    process_profile "$EVENT_ACTION" "$USER" "$EVENT_PACKAGE"
+                fi
+            done
+            ;;
 
-            debug_log "App Watcher" "ADDED queue result" \
-                "action=$EVENT_ACTION user=$USER package=$EVENT_PACKAGE status=$QUEUE_STATUS"
-        done
-    fi
+        REMOVED)
+            process_profile "$EVENT_ACTION" "$EVENT_USER" "$EVENT_PACKAGE"
+            ;;
+    esac
 }
 
 write_app_event() {
@@ -304,7 +315,23 @@ process_profile() {
         log_info "Package" "Processed" \
             "action=$ACTION user=$USER package=$PACKAGE status=${RESULT_LINE:-OK}"
 
-        EVENT_ACTION="${RESULT_LINE%%\|*}"
+        EVENT_ACTION="$ACTION"
+
+        RESULT_ACTION="$(printf '%s\n' "$RESULT_LINE" | "$CUT" -d'|' -f1)"
+        RESULT_DETAIL="$(printf '%s\n' "$RESULT_LINE" | "$CUT" -d'|' -f2)"
+
+        case "$RESULT_ACTION" in
+            ADDED|UPDATED|REMOVED)
+                EVENT_ACTION="$RESULT_ACTION"
+                ;;
+            UNCHANGED)
+                case "$RESULT_DETAIL" in
+                    ADDED|UPDATED|REMOVED)
+                        EVENT_ACTION="$RESULT_DETAIL"
+                        ;;
+                esac
+                ;;
+        esac
 
         case "$EVENT_ACTION" in
             ADDED|UPDATED|REMOVED)
