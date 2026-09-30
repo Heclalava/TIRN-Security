@@ -2970,9 +2970,11 @@ async function confirmClearLogs(){
   setTaskStatus("CLEARING LOG");
 
   try{
-    await api(clearLogTarget==="debug"?"/cgi-bin/logs-clear-debug":"/cgi-bin/logs-clear-system");
-    title.textContent=label+" cleared";
-    message.textContent="TIRN Security "+label+" was cleared successfully.";
+    await api(clearLogTarget==="debug"?"/logs-clear-debug":"/logs-clear-system");
+    title.textContent=label==="service.log"?"Service log cleared":label+" cleared";
+    message.textContent=label==="service.log"
+      ?"TIRN Security Service log was cleared successfully."
+      :"TIRN Security "+label+" was cleared successfully.";
     error.textContent="";
   }catch(e){
     title.textContent="Failed to clear "+label;

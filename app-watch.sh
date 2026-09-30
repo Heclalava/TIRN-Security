@@ -22,6 +22,7 @@ LOG="$DATA_DIR/service.log"
 DEBUG_LOG="$DATA_DIR/debug.log"
 LOCK="$DATA_DIR/app-watch.lock"
 APP_EVENT_QUEUE="$DATA_DIR/app-events"
+APP_RETRY_QUEUE="$DATA_DIR/app-events-retry"
 
 DEBOUNCE=2
 
@@ -32,14 +33,14 @@ DEBUG_LOG="$DEBUG_LOG"
 mkdir -p "$DATA_DIR" || exit 1
 chmod 700 "$DATA_DIR"
 
-if ! "$MKDIR" "$APP_EVENT_QUEUE" 2>/dev/null; then
-    if [ ! -d "$APP_EVENT_QUEUE" ]; then
-        log_error "App Watcher" "Startup failed" "unable to create app event directory"
+if ! "$MKDIR" "$APP_EVENT_QUEUE" "$APP_RETRY_QUEUE" 2>/dev/null; then
+    if [ ! -d "$APP_EVENT_QUEUE" ] || [ ! -d "$APP_RETRY_QUEUE" ]; then
+        log_error "App Watcher" "Startup failed" "unable to create app event directories"
         exit 1
     fi
 fi
 
-chmod 700 "$APP_EVENT_QUEUE"
+chmod 700 "$APP_EVENT_QUEUE" "$APP_RETRY_QUEUE"
 
 if ! mkdir "$LOCK" 2>/dev/null; then
     log_warn "App Watcher" "Already running" "lock=$LOCK"
@@ -53,74 +54,24 @@ cleanup() {
 
     "$RM" -f "$APP_EVENT_QUEUE"/.watch.* 2>/dev/null
     "$RM" -f "$APP_EVENT_QUEUE"/.work.* 2>/dev/null
+    "$RM" -f "$APP_RETRY_QUEUE"/.retry.* 2>/dev/null
     "$RM" -rf "$LOCK" 2>/dev/null
 }
 
 trap cleanup EXIT
 trap 'cleanup; exit 0' INT TERM HUP
 
-package_from_event() {
-    LINE="$1"
-
-    PACKAGE="$(
-        printf '%s\n' "$LINE" |
-            "$SED" -n 's/.*package:\([A-Za-z0-9._-][A-Za-z0-9._-]*\).*/\1/p' |
-            "$SED" -n '1p'
-    )"
-
-    if [ -n "$PACKAGE" ]; then
-        printf '%s\n' "$PACKAGE"
-        return 0
-    fi
-
-    PACKAGE="$(
-        printf '%s\n' "$LINE" |
-            "$SED" -n 's/.*for package \([A-Za-z0-9._-][A-Za-z0-9._-]*\).*/\1/p' |
-            "$SED" -n '1p'
-    )"
-
-    if [ -n "$PACKAGE" ]; then
-        printf '%s\n' "$PACKAGE"
-        return 0
-    fi
-
-    printf '%s\n' "$LINE" |
-        "$SED" -n 's/.*pkg=\([A-Za-z0-9._-][A-Za-z0-9._-]*\).*/\1/p' |
-        "$SED" -n '1p'
-}
-
-merge_event_action() {
-    OLD_ACTION="$1"
-    NEW_ACTION="$2"
-
-    case "$NEW_ACTION" in
-        REMOVED)
-            printf '%s\n' "REMOVED"
-            ;;
-        REPLACED)
-            case "$OLD_ACTION" in
-                REMOVED) printf '%s\n' "REMOVED" ;;
-                *)       printf '%s\n' "REPLACED" ;;
-            esac
-            ;;
-        ADDED)
-            case "$OLD_ACTION" in
-                REMOVED) printf '%s\n' "REMOVED" ;;
-                REPLACED) printf '%s\n' "REPLACED" ;;
-                *)       printf '%s\n' "ADDED" ;;
-            esac
-            ;;
-        *)
-            printf '%s\n' "$OLD_ACTION"
-            ;;
-    esac
-}
+UNINSTALL_ACTIVE=0
+UNINSTALL_PACKAGE=""
+UNINSTALL_USER=""
+UNINSTALL_ALL_USERS=""
 
 queue_event() {
-    ACTION="$1"
-    PACKAGE="$2"
+    QUEUE_ACTION="$1"
+    QUEUE_USER="$2"
+    QUEUE_PACKAGE="$3"
 
-    case "$ACTION" in
+    case "$QUEUE_ACTION" in
         ADDED|REPLACED|REMOVED)
             ;;
         *)
@@ -128,13 +79,19 @@ queue_event() {
             ;;
     esac
 
-    case "$PACKAGE" in
+    case "$QUEUE_USER" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    case "$QUEUE_PACKAGE" in
         ''|*[!A-Za-z0-9._-]*)
             return 1
             ;;
     esac
 
-    EVENT_FILE="$APP_EVENT_QUEUE/$PACKAGE"
+    EVENT_FILE="$APP_EVENT_QUEUE/${QUEUE_USER}_${QUEUE_PACKAGE}"
     EVENT_TMP="$APP_EVENT_QUEUE/.event.$$"
 
     OLD_ACTION=""
@@ -143,10 +100,31 @@ queue_event() {
     fi
 
     if [ -n "$OLD_ACTION" ]; then
-        ACTION="$(merge_event_action "$OLD_ACTION" "$ACTION")"
+        case "$QUEUE_ACTION" in
+            REMOVED)
+                QUEUE_ACTION="REMOVED"
+                ;;
+            REPLACED)
+                case "$OLD_ACTION" in
+                    REMOVED) QUEUE_ACTION="REMOVED" ;;
+                    *)       QUEUE_ACTION="REPLACED" ;;
+                esac
+                ;;
+            ADDED)
+                case "$OLD_ACTION" in
+                    REMOVED)  QUEUE_ACTION="REMOVED" ;;
+                    REPLACED) QUEUE_ACTION="REPLACED" ;;
+                    *)        QUEUE_ACTION="ADDED" ;;
+                esac
+                ;;
+        esac
     fi
 
-    printf '%s|%s\n' "$ACTION" "$("$DATE" +%s)" > "$EVENT_TMP" || {
+    printf '%s|%s|%s|%s\n' \
+        "$QUEUE_ACTION" \
+        "$QUEUE_USER" \
+        "$QUEUE_PACKAGE" \
+        "$("$DATE" +%s)" > "$EVENT_TMP" || {
         "$RM" -f "$EVENT_TMP"
         return 1
     }
@@ -156,64 +134,120 @@ queue_event() {
         return 1
     }
 
-    log_info "Package" "Event detected" \
-        "action=$ACTION package=$PACKAGE"
+    debug_log "App Watcher" "Queued package event" \
+        "action=$QUEUE_ACTION user=$QUEUE_USER package=$QUEUE_PACKAGE"
 
     return 0
 }
 
-resolve_added_replaced_users() {
-    PACKAGE="$1"
+process_logcat_line() {
+    LINE="$1"
 
-    "$PM" list users 2>/dev/null |
-        "$SED" -n 's/.*UserInfo{\([0-9][0-9]*\):.*/\1/p' |
+    if [ "$UNINSTALL_ACTIVE" -eq 1 ]; then
+        case "$LINE" in
+            *EXTRA_PACKAGE_NAME=*)
+                UNINSTALL_PACKAGE="${LINE#*EXTRA_PACKAGE_NAME=}"
+                UNINSTALL_PACKAGE="${UNINSTALL_PACKAGE%%,*}"
+                UNINSTALL_PACKAGE="${UNINSTALL_PACKAGE%%]*}"
+                ;;
+            *EXTRA_TARGET_USER_ID=*)
+                UNINSTALL_USER="${LINE#*EXTRA_TARGET_USER_ID=}"
+                UNINSTALL_USER="${UNINSTALL_USER%%,*}"
+                UNINSTALL_USER="${UNINSTALL_USER%%]*}"
+                ;;
+            *android.intent.extra.UNINSTALL_ALL_USERS=*)
+                UNINSTALL_ALL_USERS="${LINE#*android.intent.extra.UNINSTALL_ALL_USERS=}"
+                UNINSTALL_ALL_USERS="${UNINSTALL_ALL_USERS%%,*}"
+                UNINSTALL_ALL_USERS="${UNINSTALL_ALL_USERS%%]*}"
+                ;;
+        esac
+
+        case "$LINE" in
+            *"}]"*)
+                if [ "$UNINSTALL_ALL_USERS" = "false" ] &&
+                   [ -n "$UNINSTALL_PACKAGE" ] &&
+                   [ -n "$UNINSTALL_USER" ]; then
+                    queue_event "REMOVED" \
+                        "$UNINSTALL_USER" \
+                        "$UNINSTALL_PACKAGE"
+                fi
+
+                UNINSTALL_ACTIVE=0
+                UNINSTALL_PACKAGE=""
+                UNINSTALL_USER=""
+                UNINSTALL_ALL_USERS=""
+                ;;
+        esac
+
+        return 0
+    fi
+
+    case "$LINE" in
+        *"ActivityManager:"*"Force stopping "*)
+            EVENT_PACKAGE="${LINE#*Force stopping }"
+            EVENT_PACKAGE="${EVENT_PACKAGE%% appid=*}"
+
+            EVENT_USER="${LINE#* user=}"
+            EVENT_USER="${EVENT_USER%%:*}"
+
+            if [ -n "$EVENT_PACKAGE" ] &&
+               [ -n "$EVENT_USER" ]; then
+                debug_log "App Watcher" "REMOVED parser matched" \
+                    "user=$EVENT_USER package=$EVENT_PACKAGE"
+                queue_event "REMOVED" "$EVENT_USER" "$EVENT_PACKAGE"
+            fi
+
+            return 0
+            ;;
+    esac
+
+    case "$LINE" in
+        *"PackageManager:"*"Update package "*)
+            EVENT_PACKAGE="${LINE#*Update package }"
+            EVENT_PACKAGE="${EVENT_PACKAGE%% *}"
+            EVENT_ACTION="REPLACED"
+            ;;
+
+        *"PackageManager:"*"installation completed for package:"*)
+            EVENT_PACKAGE="${LINE#*installation completed for package:}"
+            EVENT_PACKAGE="${EVENT_PACKAGE%%. Final code path:*}"
+            debug_log "App Watcher" "ADDED parser matched" \
+                "package=$EVENT_PACKAGE"
+            EVENT_ACTION="ADDED"
+            ;;
+
+        *)
+            return 0
+            ;;
+    esac
+
+    case "$EVENT_PACKAGE" in
+        ''|*[!A-Za-z0-9._-]*)
+            return 0
+            ;;
+    esac
+
+    if [ -f "$APPS_IDENTITY" ]; then
+        "$AWK" -F'|' -v p="$EVENT_PACKAGE" '
+            NF == 3 && $2 == p {
+                print $1
+            }
+        ' "$APPS_IDENTITY" |
         "$SORT" -nu |
         while IFS= read -r USER
         do
             [ -n "$USER" ] || continue
 
-            if "$PM" list packages --user "$USER" -U "$PACKAGE" 2>/dev/null |
-                "$AWK" -v p="$PACKAGE" '
-                    $1 == ("package:" p) && $2 ~ /^uid:[0-9]+$/ {
-                        sub(/^uid:/, "", $2)
-                        print $2
-                        exit
-                    }
-                ' |
-                "$GREP" -q '^[0-9][0-9]*$'; then
-                printf '%s\n' "$USER"
-            fi
+            debug_log "App Watcher" "ADDED identity match" \
+                "action=$EVENT_ACTION user=$USER package=$EVENT_PACKAGE"
+
+            queue_event "$EVENT_ACTION" "$USER" "$EVENT_PACKAGE"
+            QUEUE_STATUS=$?
+
+            debug_log "App Watcher" "ADDED queue result" \
+                "action=$EVENT_ACTION user=$USER package=$EVENT_PACKAGE status=$QUEUE_STATUS"
         done
-}
-
-resolve_removed_users() {
-    PACKAGE="$1"
-
-    [ -f "$APPS_IDENTITY" ] || return 0
-
-    "$AWK" -F'|' -v p="$PACKAGE" '
-        NF == 3 && $2 == p && $1 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {
-            print $1
-        }
-    ' "$APPS_IDENTITY" |
-    "$SORT" -nu |
-    while IFS= read -r USER
-    do
-        [ -n "$USER" ] || continue
-
-        if ! "$PM" list packages --user "$USER" -U "$PACKAGE" 2>/dev/null |
-            "$AWK" -v p="$PACKAGE" '
-                $1 == ("package:" p) && $2 ~ /^uid:[0-9]+$/ {
-                    found = 1
-                    exit
-                }
-                END {
-                    exit(found ? 0 : 1)
-                }
-            '; then
-            printf '%s\n' "$USER"
-        fi
-    done
+    fi
 }
 
 write_app_event() {
@@ -313,9 +347,10 @@ process_profile() {
 
 process_event_file() {
     EVENT_FILE="$1"
-    PACKAGE="${EVENT_FILE##*/}"
+    EVENT_SOURCE="$2"
+    EVENT_NAME="${EVENT_FILE##*/}"
 
-    case "$PACKAGE" in
+    case "$EVENT_NAME" in
         ''|.*|*[!A-Za-z0-9._-]*)
             "$RM" -f "$EVENT_FILE"
             return 0
@@ -324,8 +359,39 @@ process_event_file() {
 
     EVENT_DATA="$("$CAT" "$EVENT_FILE" 2>/dev/null)" || return 1
 
-    ACTION="$(printf '%s\n' "$EVENT_DATA" | "$AWK" -F'|' 'NR==1 {print $1}')"
-    EVENT_TIME="$(printf '%s\n' "$EVENT_DATA" | "$AWK" -F'|' 'NR==1 {print $2}')"
+    FIELD_COUNT="$(printf '%s\n' "$EVENT_DATA" |
+        "$AWK" -F'|' 'NR==1 {print NF}')"
+
+    ACTION="$(printf '%s\n' "$EVENT_DATA" |
+        "$AWK" -F'|' 'NR==1 {print $1}')"
+
+    EVENT_USER=""
+    EVENT_PACKAGE=""
+    EVENT_TIME=""
+    RETRY_USERS=""
+
+    case "$EVENT_SOURCE:$FIELD_COUNT" in
+        EVENT:4)
+            EVENT_USER="$(printf '%s\n' "$EVENT_DATA" |
+                "$AWK" -F'|' 'NR==1 {print $2}')"
+            EVENT_PACKAGE="$(printf '%s\n' "$EVENT_DATA" |
+                "$AWK" -F'|' 'NR==1 {print $3}')"
+            EVENT_TIME="$(printf '%s\n' "$EVENT_DATA" |
+                "$AWK" -F'|' 'NR==1 {print $4}')"
+            ;;
+        RETRY:4)
+            EVENT_TIME="$(printf '%s\n' "$EVENT_DATA" |
+                "$AWK" -F'|' 'NR==1 {print $2}')"
+            RETRY_USERS="$(printf '%s\n' "$EVENT_DATA" |
+                "$AWK" -F'|' 'NR==1 {print $3}')"
+            EVENT_PACKAGE="$(printf '%s\n' "$EVENT_DATA" |
+                "$AWK" -F'|' 'NR==1 {print $4}')"
+            ;;
+        *)
+            "$RM" -f "$EVENT_FILE"
+            return 0
+            ;;
+    esac
 
     case "$ACTION" in
         ADDED|REPLACED|REMOVED)
@@ -343,23 +409,30 @@ process_event_file() {
             ;;
     esac
 
-    NOW="$("$DATE" +%s)"
-    AGE=$((NOW - EVENT_TIME))
+    if [ "$EVENT_SOURCE" = "EVENT" ]; then
+        case "$EVENT_USER" in
+            ''|*[!0-9]*)
+                "$RM" -f "$EVENT_FILE"
+                return 0
+                ;;
+        esac
 
-    if [ "$AGE" -lt "$DEBOUNCE" ]; then
-        return 0
-    fi
+        case "$EVENT_PACKAGE" in
+            ''|*[!A-Za-z0-9._-]*)
+                "$RM" -f "$EVENT_FILE"
+                return 0
+                ;;
+        esac
+    else
+        case "$RETRY_USERS" in
+            ''|*[!0-9,]*)
+                log_error "Package" "Invalid retry profile list" \
+                    "action=$ACTION package=$EVENT_PACKAGE users=$RETRY_USERS"
+                "$RM" -f "$EVENT_FILE"
+                return 1
+                ;;
+        esac
 
-    WORK_FILE="$APP_EVENT_QUEUE/.work.$$"
-    if ! "$MV" -f "$EVENT_FILE" "$WORK_FILE" 2>/dev/null; then
-        return 0
-    fi
-
-    EVENT_DATA="$("$CAT" "$WORK_FILE" 2>/dev/null)"
-    ACTION="$(printf '%s\n' "$EVENT_DATA" | "$AWK" -F'|' 'NR==1 {print $1}')"
-    RETRY_USERS="$(printf '%s\n' "$EVENT_DATA" | "$AWK" -F'|' 'NR==1 {print $3}')"
-
-    if [ -n "$RETRY_USERS" ]; then
         if ! printf '%s\n' "$RETRY_USERS" |
             "$AWK" -F',' '
                 {
@@ -372,37 +445,41 @@ process_event_file() {
                 }
             '; then
             log_error "Package" "Invalid retry profile list" \
-                "action=$ACTION package=$PACKAGE users=$RETRY_USERS"
-            "$RM" -f "$WORK_FILE"
+                "action=$ACTION package=$EVENT_PACKAGE users=$RETRY_USERS"
+            "$RM" -f "$EVENT_FILE"
             return 1
         fi
     fi
 
-    log_info "Package" "Event coalesced" \
-        "action=$ACTION package=$PACKAGE"
+    NOW="$("$DATE" +%s)"
+    AGE=$((NOW - EVENT_TIME))
 
-    if [ -n "$RETRY_USERS" ]; then
+    if [ "$AGE" -lt "$DEBOUNCE" ]; then
+        return 0
+    fi
+
+    WORK_FILE="$APP_EVENT_QUEUE/.work.$$"
+    if ! "$MV" -f "$EVENT_FILE" "$WORK_FILE" 2>/dev/null; then
+        return 0
+    fi
+
+    if [ "$EVENT_SOURCE" = "RETRY" ]; then
         USERS="$(printf '%s\n' "$RETRY_USERS" |
             tr ',' '\n' |
             "$SORT" -nu)"
 
         log_info "Package" "Retry profiles restored" \
-            "action=$ACTION package=$PACKAGE users=$RETRY_USERS"
+            "action=$ACTION package=$EVENT_PACKAGE users=$RETRY_USERS"
     else
-        case "$ACTION" in
-            ADDED|REPLACED)
-                USERS="$(resolve_added_replaced_users "$PACKAGE")"
-                ;;
-            REMOVED)
-                USERS="$(resolve_removed_users "$PACKAGE")"
-                log_info "Package" "Removal users resolved"                     "package=$PACKAGE users=${USERS:-NONE}"
-                ;;
-        esac
+        USERS="$EVENT_USER"
+
+        log_info "Package" "Event coalesced" \
+            "action=$ACTION user=$EVENT_USER package=$EVENT_PACKAGE"
     fi
 
     if [ -z "$USERS" ]; then
         log_info "Package" "No affected profiles" \
-            "action=$ACTION package=$PACKAGE"
+            "action=$ACTION package=$EVENT_PACKAGE"
         "$RM" -f "$WORK_FILE"
         return 0
     fi
@@ -415,7 +492,7 @@ process_event_file() {
         "$RM" -f "$RETRY_FILE"
         "$MV" -f "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
             log_error "Package" "Event recovery failed" \
-                "action=$ACTION package=$PACKAGE status=RETRY_FILE_CREATE"
+                "action=$ACTION package=$EVENT_PACKAGE status=RETRY_FILE_CREATE"
         }
         return 1
     }
@@ -425,7 +502,7 @@ process_event_file() {
         "$RM" -f "$RETRY_FILE"
         "$MV" -f "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
             log_error "Package" "Event recovery failed" \
-                "action=$ACTION package=$PACKAGE status=USERS_FILE_CREATE"
+                "action=$ACTION package=$EVENT_PACKAGE status=USERS_FILE_CREATE"
         }
         return 1
     }
@@ -435,9 +512,9 @@ process_event_file() {
         [ -n "$USER" ] || continue
 
         log_info "Package" "Profile resolved" \
-            "action=$ACTION user=$USER package=$PACKAGE"
+            "action=$ACTION user=$USER package=$EVENT_PACKAGE"
 
-        process_profile "$ACTION" "$USER" "$PACKAGE"
+        process_profile "$ACTION" "$USER" "$EVENT_PACKAGE"
         STATUS=$?
 
         if [ "$STATUS" -eq 2 ]; then
@@ -470,29 +547,32 @@ process_event_file() {
                 "$RM" -f "$RETRY_FILE"
                 "$MV" -f "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
                     log_error "Package" "Event recovery failed" \
-                        "action=$ACTION package=$PACKAGE status=RETRY_STATE"
+                        "action=$ACTION package=$EVENT_PACKAGE status=RETRY_STATE"
                 }
                 log_error "Package" "Retry state creation failed" \
-                    "action=$ACTION package=$PACKAGE users=$RETRY_USERS"
+                    "action=$ACTION package=$EVENT_PACKAGE users=$RETRY_USERS"
                 return 1
                 ;;
         esac
 
-        RETRY_TMP="$APP_EVENT_QUEUE/.retry-event.$$"
+        RETRY_TMP="$APP_RETRY_QUEUE/.retry-event.$$"
 
-        printf '%s|%s|%s\n' \
+        printf '%s|%s|%s|%s\n' \
             "$RETRY_ACTION" \
             "$RETRY_TIME" \
-            "$RETRY_USERS" > "$RETRY_TMP" || {
+            "$RETRY_USERS" \
+            "$EVENT_PACKAGE" > "$RETRY_TMP" || {
             "$RM" -f "$RETRY_TMP" "$RETRY_FILE"
             "$MV" -n "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
                 log_error "Package" "Event recovery failed" \
-                    "action=$ACTION package=$PACKAGE status=RETRY_EVENT_CREATE"
+                    "action=$ACTION package=$EVENT_PACKAGE status=RETRY_EVENT_CREATE"
             }
             return 1
         }
 
-        "$MV" -n "$RETRY_TMP" "$EVENT_FILE" 2>/dev/null
+        RETRY_EVENT_FILE="$APP_RETRY_QUEUE/${EVENT_PACKAGE}"
+
+        "$MV" -n "$RETRY_TMP" "$RETRY_EVENT_FILE" 2>/dev/null
         RETRY_INSTALL_STATUS=$?
 
         if [ -e "$EVENT_FILE" ]; then
@@ -501,18 +581,18 @@ process_event_file() {
             "$RM" -f "$RETRY_TMP" "$RETRY_FILE"
             "$MV" -n "$WORK_FILE" "$EVENT_FILE" 2>/dev/null || {
                 log_error "Package" "Event recovery failed" \
-                    "action=$ACTION package=$PACKAGE status=RETRY_EVENT_INSTALL"
+                    "action=$ACTION package=$EVENT_PACKAGE status=RETRY_EVENT_INSTALL"
             }
             return 1
         else
             "$RM" -f "$RETRY_TMP" "$RETRY_FILE"
             log_error "Package" "Event recovery failed" \
-                "action=$ACTION package=$PACKAGE status=RETRY_EVENT_MISSING"
+                "action=$ACTION package=$EVENT_PACKAGE status=RETRY_EVENT_MISSING"
             return 1
         fi
 
         log_warn "Package" "Processing deferred" \
-            "action=$ACTION package=$PACKAGE retry=1 users=$RETRY_USERS"
+            "action=$ACTION package=$EVENT_PACKAGE retry=1 users=$RETRY_USERS"
 
         "$RM" -f "$RETRY_FILE" "$WORK_FILE"
         return 2
@@ -528,32 +608,29 @@ log_info "App Watcher" "Started" \
 
 START_TIME="$("$DATE" "+%m-%d %H:%M:%S.000")"
 
-"$LOGCAT" -v threadtime -T "$START_TIME" 2>/dev/null |
+"$LOGCAT" \
+    -b system \
+    -v threadtime \
+    -T "$START_TIME" \
+    'PackageManager:I' \
+    'ActivityManager:I' \
+    '*:S' \
+    2>/dev/null |
 while IFS= read -r LINE
 do
-    case "$LINE" in
-        *PACKAGE_ADDED*)
-            PACKAGE="$(package_from_event "$LINE")"
-            [ -n "$PACKAGE" ] &&
-                queue_event "ADDED" "$PACKAGE"
-            ;;
-        *PACKAGE_REPLACED*)
-            PACKAGE="$(package_from_event "$LINE")"
-            [ -n "$PACKAGE" ] &&
-                queue_event "REPLACED" "$PACKAGE"
-            ;;
-        *PACKAGE_REMOVED*|*PACKAGE_FULLY_REMOVED*)
-            PACKAGE="$(package_from_event "$LINE")"
-            [ -n "$PACKAGE" ] &&
-                queue_event "REMOVED" "$PACKAGE"
-            ;;
-    esac
+    process_logcat_line "$LINE"
 done &
 
 LOGCAT_PID=$!
 
 while true
 do
+    if ! kill -0 "$LOGCAT_PID" 2>/dev/null; then
+        log_error "App Watcher" "Logcat reader stopped" \
+            "pid=$LOGCAT_PID"
+        exit 1
+    fi
+
     FOUND=0
 
     for EVENT_FILE in "$APP_EVENT_QUEUE"/*
@@ -564,11 +641,22 @@ do
         esac
 
         FOUND=1
-        process_event_file "$EVENT_FILE"
+        process_event_file "$EVENT_FILE" "EVENT"
+    done
+
+    for RETRY_EVENT in "$APP_RETRY_QUEUE"/*
+    do
+        [ -f "$RETRY_EVENT" ] || continue
+        case "${RETRY_EVENT##*/}" in
+            .*) continue ;;
+        esac
+
+        FOUND=1
+        process_event_file "$RETRY_EVENT" "RETRY"
     done
 
     if [ "$FOUND" -eq 0 ]; then
-        sleep 1
+        sleep 3
     else
         sleep 1
     fi

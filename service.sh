@@ -32,8 +32,7 @@ chmod 700 "$DATA_DIR"
 if [ "${1:-}" != "--policy-event" ] &&
    [ "${1:-}" != "--refresh" ] &&
    [ "${1:-}" != "--import-policy" ] &&
-   [ "${1:-}" != "--reconcile-stale-policy" ] &&
-   [ "${1:-}" != "--remove-app-policy" ]; then
+   [ "${1:-}" != "--reconcile-stale-policy" ]; then
     touch "$POLICY_FILE"
     chmod 600 "$POLICY_FILE"
 fi
@@ -3985,29 +3984,6 @@ if [ "${1:-}" = "--reconcile-stale-policy" ]; then
     exit $?
 fi
 
-if [ "${1:-}" = "--remove-app-policy" ]; then
-    if [ "$#" -ne 3 ]; then
-        printf '%s\n' "Usage: $0 --remove-app-policy USER PACKAGE" >&2
-        exit 2
-    fi
-
-    case "$2" in
-        ''|*[!0-9]*)
-            printf '%s\n' "Invalid user" >&2
-            exit 2
-            ;;
-    esac
-
-    case "$3" in
-        ''|*[!A-Za-z0-9._-]*)
-            printf '%s\n' "Invalid package" >&2
-            exit 2
-            ;;
-    esac
-
-    import_policy_transaction "remove" "$2" "$3"
-    exit $?
-fi
 
 if [ "${1:-}" = "--policy-event" ]; then
     apply_policy
