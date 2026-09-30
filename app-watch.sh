@@ -190,8 +190,13 @@ process_logcat_line() {
             EVENT_USER="${LINE#* user=}"
             EVENT_USER="${EVENT_USER%%:*}"
 
-            if [ -n "$EVENT_PACKAGE" ] &&
-               [ -n "$EVENT_USER" ]; then
+            case "$EVENT_USER" in
+                ''|*[!0-9]*)
+                    return 0
+                    ;;
+            esac
+
+            if [ -n "$EVENT_PACKAGE" ]; then
                 debug_log "App Watcher" "REMOVED parser matched" \
                     "user=$EVENT_USER package=$EVENT_PACKAGE"
                 queue_event "REMOVED" "$EVENT_USER" "$EVENT_PACKAGE"
