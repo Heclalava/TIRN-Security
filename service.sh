@@ -225,14 +225,12 @@ start_app_watch() {
 }
 
 ensure_app_watch_running() {
-    if kill -0 "$APP_WATCH_PID" 2>/dev/null &&
-       [ -d "$DATA_DIR/app-watch.lock" ]; then
+    if [ -d "$DATA_DIR/app-watch.lock" ]; then
         return 0
     fi
 
-    log_warn "App Watcher" "Process unhealthy"         "old_pid=$APP_WATCH_PID lock=$DATA_DIR/app-watch.lock"
-
-    rm -rf "$DATA_DIR/app-watch.lock" 2>/dev/null || true
+    log_warn "App Watcher" "Process unhealthy" \
+        "old_pid=$APP_WATCH_PID lock=$DATA_DIR/app-watch.lock"
 
     start_app_watch
 }
