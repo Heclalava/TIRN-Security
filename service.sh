@@ -1302,62 +1302,13 @@ prepare_policy() {
     PREPARED_COUNT="$2"
     POLICY_SOURCE="${3:-$POLICY_FILE}"
 
-    TMP_MAP="$DATA_DIR/apps.uidmap.$$"
     TMP_PREPARED="$PREPARED_POLICY.tmp.$$"
     TMP_NORMALIZED="$PREPARED_POLICY.normalized.$$"
 
-    rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
-
-    if [ ! -f "$DATA_DIR/apps.json" ]; then
-        log_error "Policy" "Preparation failed" "apps cache missing"
-        return 1
-    fi
-
-    if ! sed 's/},{/}\n{/g' "$DATA_DIR/apps.json" |
-        awk '
-            {
-                user = ""
-                pkg = ""
-                uid = ""
-
-                if (match($0, /"user":"[0-9]+"/)) {
-                    x = substr($0, RSTART, RLENGTH)
-                    sub(/^"user":"/, "", x)
-                    sub(/"$/, "", x)
-                    user = x
-                }
-
-                if (match($0, /"pkg":"[^"]+"/)) {
-                    x = substr($0, RSTART, RLENGTH)
-                    sub(/^"pkg":"/, "", x)
-                    sub(/"$/, "", x)
-                    pkg = x
-                }
-
-                if (match($0, /"uid":"[0-9]+"/)) {
-                    x = substr($0, RSTART, RLENGTH)
-                    sub(/^"uid":"/, "", x)
-                    sub(/"$/, "", x)
-                    uid = x
-                }
-
-                if (user != "" && pkg != "" && uid != "")
-                    print user "|" pkg "|" uid
-            }
-        ' > "$TMP_MAP"; then
-        rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
-        log_error "Policy" "Preparation failed" "unable to build app UID map"
-        return 1
-    fi
+    rm -f "$TMP_PREPARED" "$TMP_NORMALIZED"
 
     if ! awk -F'|' '
-        FILENAME == ARGV[1] {
-            if (NF == 3)
-                app_uid[$1 SUBSEP $2] = $3
-            next
-        }
-
-        FILENAME == ARGV[2] {
+        {
             line_no++
 
             if ($0 ~ /^[[:space:]]*#/)
@@ -1404,20 +1355,7 @@ prepare_policy() {
                 exit 2
             }
 
-            key = user SUBSEP pkg
-
-            if (!(key in app_uid)) {
-                print user "|" pkg "|" uid "|" network "|" action
-                next
-            }
-
-            if (app_uid[key] != uid) {
-                print user "|" pkg "|" uid "|" network "|" action
-                next
-            }
-
             print user "|" pkg "|" uid "|" network "|" action
-            next
         }
 
         END {
@@ -1426,23 +1364,26 @@ prepare_policy() {
                 exit 2
             }
         }
-    ' "$TMP_MAP" "$POLICY_SOURCE" > "$TMP_NORMALIZED"; then
-        rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
-        log_error "Policy" "Preparation failed" "policy validation or UID resolution failed"
+    ' "$POLICY_SOURCE" > "$TMP_NORMALIZED"; then
+        rm -f "$TMP_PREPARED" "$TMP_NORMALIZED"
+        log_error "Policy" "Preparation failed" \
+            "policy validation failed"
         return 1
     fi
 
     if ! sort -u "$TMP_NORMALIZED" > "$TMP_PREPARED"; then
-        rm -f "$TMP_MAP" "$TMP_PREPARED" "$TMP_NORMALIZED"
-        log_error "Policy" "Preparation failed" "unable to sort prepared policy"
+        rm -f "$TMP_PREPARED" "$TMP_NORMALIZED"
+        log_error "Policy" "Preparation failed" \
+            "unable to sort prepared policy"
         return 1
     fi
 
-    rm -f "$TMP_MAP" "$TMP_NORMALIZED"
+    rm -f "$TMP_NORMALIZED"
 
     if ! mv -f "$TMP_PREPARED" "$PREPARED_POLICY"; then
         rm -f "$TMP_PREPARED" "$PREPARED_POLICY"
-        log_error "Policy" "Preparation failed" "unable to finalize prepared policy"
+        log_error "Policy" "Preparation failed" \
+            "unable to finalize prepared policy"
         return 1
     fi
 
