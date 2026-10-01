@@ -124,6 +124,38 @@ clear_stale_boot_locks() {
     done
 }
 
+clear_stale_transaction_markers() {
+    IMPORT_MARKER="$DATA_DIR/policy.importing"
+
+    if [ -e "$IMPORT_MARKER" ]; then
+        rm -f "$IMPORT_MARKER" 2>/dev/null || true
+        log_warn "Recovery" \
+            "Removed stale transaction marker" \
+            "marker=$IMPORT_MARKER"
+    fi
+}
+
+cleanup_stale_generated_files() {
+    find "$DATA_DIR" -maxdepth 1 -type f \
+        \( \
+            -name "policy.prepared.*" \
+            -o -name "policy.count.bootstrap.*" \
+            -o -name "policy.count.*" \
+            -o -name "policy.recovery.*" \
+            -o -name "policy.import.*" \
+            -o -name "policy.remove.count.*" \
+            -o -name "policy.conf.import.*" \
+            -o -name "policy.applied.recovery.*" \
+            -o -name "policy.applied.rollback.*" \
+            -o -name "policy.applied.transaction.tmp.*" \
+            -o -name "network.state.bootstrap.*" \
+            -o -name "network.state.bootwait.*" \
+            -o -name "network.state.tmp.*" \
+            -o -name "network.state.current.*" \
+        \) \
+        -delete 2>/dev/null || true
+}
+
 recover_stale_app_events() {
     APP_EVENT_DIR="$DATA_DIR/app-events"
 
@@ -4051,6 +4083,8 @@ process_app_events() {
 log_info "Service" "Started" "module initialization"
 
 clear_stale_boot_locks
+clear_stale_transaction_markers
+cleanup_stale_generated_files
 recover_stale_app_events
 
 if ! bootstrap_initialize; then
