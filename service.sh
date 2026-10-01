@@ -4132,7 +4132,6 @@ while true; do
     while [ "$WAITED" -lt "$POLL_INTERVAL" ]; do
         if [ -f "$NETWORK_EVENT_FILE" ]; then
             rm -f "$NETWORK_EVENT_FILE" 2>/dev/null || true
-            debug_log "Network Watcher" "Network event detected"                 "dispatcher wake-up"
             break
         fi
 
