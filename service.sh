@@ -209,7 +209,10 @@ start_network_watch() {
 
         while IFS= read -r EVENT; do
             [ -n "$EVENT" ] || continue
-            : > "$NETWORK_EVENT_FILE"
+
+            if [ ! -f "$NETWORK_EVENT_FILE" ]; then
+                : > "$NETWORK_EVENT_FILE"
+            fi
         done < "$NETWORK_WATCH_FIFO"
     ) &
 
