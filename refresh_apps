@@ -18,6 +18,7 @@ APK_LABEL_STORE_VERSION="1"
 APK_LABEL_STORE_HEADER=""
 APK_LABEL_META="$DATA_DIR/apk-label-meta.$$"
 APK_LABEL_RESULTS="$DATA_DIR/apk-label-results.$$"
+APK_LABEL_RESOLVED="$DATA_DIR/apk-label-resolved.$$"
 APK_UNIQUE="$DATA_DIR/apk-unique.$$"
 ELIGIBLE_PKGS="$DATA_DIR/eligible-pkgs.$$"
 IDENTITY_TMP="$DATA_DIR/apps.identity.$$"
@@ -125,7 +126,7 @@ if ! acquire_apps_lock; then
     exit 2
 fi
 
-trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; if [ "$TIRN_REFRESH_SOURCE" = "UI" ]; then REFRESH_DURATION=$(( $(date +%s) - REFRESH_START )); if [ "$STATUS" -eq 0 ]; then log_info "Apps" "Cache manually refreshed" "UI refresh duration=${REFRESH_DURATION}s"; else log_error "Apps" "Cache refresh failed" "UI refresh duration=${REFRESH_DURATION}s status=ERROR"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_LABEL_META" "$APK_LABEL_RESULTS" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$IDENTITY_TMP" "$IDENTITY_RAW" "$PROGRESS_TMP" "$APK_LABEL_STORE_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; if [ "$TIRN_REFRESH_SOURCE" = "UI" ]; then REFRESH_DURATION=$(( $(date +%s) - REFRESH_START )); if [ "$STATUS" -eq 0 ]; then log_info "Apps" "Cache manually refreshed" "UI refresh duration=${REFRESH_DURATION}s"; else log_error "Apps" "Cache refresh failed" "UI refresh duration=${REFRESH_DURATION}s status=ERROR"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_LABEL_META" "$APK_LABEL_RESULTS" "$APK_LABEL_RESOLVED" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$IDENTITY_TMP" "$IDENTITY_RAW" "$PROGRESS_TMP" "$APK_LABEL_STORE_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
 
 
 "$PM" list users 2>/dev/null |
@@ -292,46 +293,82 @@ fi
 : > "$APK_LABEL_STORE_TMP"
 printf '%s\n' "$APK_LABEL_STORE_HEADER" >> "$APK_LABEL_STORE_TMP"
 
+# Resolve only entries that were not already present in the label cache.
+# All normal SUCCESS/FAILURE records are processed in one awk pass below.
+: > "$APK_LABEL_RESOLVED" || exit 1
+
 while IFS="$(printf '\t')" read -r apk inode size mtime status label
 do
     [ -z "$apk" ] && continue
+    [ "$status" = "PENDING" ] || continue
 
-    case "$status" in
-        SUCCESS)
-            printf '%s\t%s\t%s\t%s\tSUCCESS\t%s\n'                 "$apk" "$inode" "$size" "$mtime" "$label" >> "$APK_LABEL_STORE_TMP"
-            printf '%s|%s\n' "$apk" "$label" >> "$APK_LABEL_CACHE"
-            ;;
+    name="$(get_apk_label "$apk")"
 
-        FAILURE)
-            # Preserve the cached failure. Do not repeatedly invoke
-            # the resolver for an unchanged APK.
-            printf '%s\t%s\t%s\t%s\tFAILURE\t\n'                 "$apk" "$inode" "$size" "$mtime" >> "$APK_LABEL_STORE_TMP"
-            ;;
-
-        PENDING)
-            name="$(get_apk_label "$apk")"
-
-            case "$name" in
-                *"
+    case "$name" in
+        *"
 "*|*"	"*) name="" ;;
-            esac
-
-            if [ -n "$name" ]; then
-                printf '%s\t%s\t%s\t%s\tSUCCESS\t%s\n' \
-                    "$apk" "$inode" "$size" "$mtime" "$name" >> "$APK_LABEL_STORE_TMP"
-                printf '%s|%s\n' "$apk" "$name" >> "$APK_LABEL_CACHE"
-            else
-                printf '%s\t%s\t%s\t%s\tFAILURE\t\n' \
-                    "$apk" "$inode" "$size" "$mtime" >> "$APK_LABEL_STORE_TMP"
-            fi
-            ;;
     esac
 
-    PROGRESS_PROCESSED=$((PROGRESS_PROCESSED + 1))
-    if [ $((PROGRESS_PROCESSED % 5)) -eq 0 ] || [ "$PROGRESS_PROCESSED" -eq "$PROGRESS_TOTAL" ]; then
-        write_progress "RUNNING" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"
+    if [ -n "$name" ]; then
+        printf '%s\tSUCCESS\t%s\n' "$apk" "$name" >> "$APK_LABEL_RESOLVED"
+    else
+        printf '%s\tFAILURE\t\n' "$apk" >> "$APK_LABEL_RESOLVED"
     fi
 done < "$APK_LABEL_RESULTS"
+
+PROGRESS_PROCESSED=0
+
+/system/bin/awk -F'\t' '
+BEGIN {
+    while ((getline line < "'"$APK_LABEL_RESOLVED"'") > 0) {
+        split(line, r, "\t")
+        resolved[r[1]] = r[2]
+        resolved_label[r[1]] = r[3]
+    }
+    close("'"$APK_LABEL_RESOLVED"'")
+}
+{
+    apk = $1
+    inode = $2
+    size = $3
+    mtime = $4
+    status = $5
+    label = $6
+
+    if (status == "SUCCESS") {
+        printf "%s\t%s\t%s\t%s\tSUCCESS\t%s\n", \
+            apk, inode, size, mtime, label >> "'"$APK_LABEL_STORE_TMP"'"
+        printf "%s|%s\n", apk, label >> "'"$APK_LABEL_CACHE"'"
+    }
+    else if (status == "FAILURE") {
+        printf "%s\t%s\t%s\t%s\tFAILURE\t\n", \
+            apk, inode, size, mtime >> "'"$APK_LABEL_STORE_TMP"'"
+    }
+    else if (status == "PENDING") {
+        if (resolved[apk] == "SUCCESS") {
+            printf "%s\t%s\t%s\t%s\tSUCCESS\t%s\n", \
+                apk, inode, size, mtime, resolved_label[apk] >> "'"$APK_LABEL_STORE_TMP"'"
+            printf "%s|%s\n", apk, resolved_label[apk] >> "'"$APK_LABEL_CACHE"'"
+        }
+        else {
+            printf "%s\t%s\t%s\t%s\tFAILURE\t\n", \
+                apk, inode, size, mtime >> "'"$APK_LABEL_STORE_TMP"'"
+        }
+    }
+
+    processed++
+    if (processed % 5 == 0 || processed == '"$PROGRESS_TOTAL"')
+        printf "PROGRESS|%d|%d\n", processed, '"$PROGRESS_TOTAL"'
+}
+' "$APK_LABEL_RESULTS" |
+while IFS='|' read -r marker processed total
+do
+    [ "$marker" = "PROGRESS" ] || continue
+    PROGRESS_PROCESSED="$processed"
+    write_progress "RUNNING" "$processed" "$total"
+done
+
+rm -f "$APK_LABEL_RESOLVED"
 
 mv -f "$APK_LABEL_STORE_TMP" "$APK_LABEL_STORE" || exit 1
 
