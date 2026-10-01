@@ -21,6 +21,7 @@ POLL_INTERVAL=30
 POST_BOOT_REFRESH_DELAY=30
 
 NETWORK_EVENT_FILE="$DATA_DIR/network-event.pending"
+NETWORK_EVENT_SETTLE=3
 NETWORK_WATCH_PID=""
 NETWORK_WATCH_FIFO="$DATA_DIR/network-event.monitor.$$"
 
@@ -4134,8 +4135,12 @@ while true; do
 
     while [ "$WAITED" -lt "$POLL_INTERVAL" ]; do
         if [ -f "$NETWORK_EVENT_FILE" ]; then
-            rm -f "$NETWORK_EVENT_FILE" 2>/dev/null || true
-            break
+            sleep "$NETWORK_EVENT_SETTLE"
+
+            if [ -f "$NETWORK_EVENT_FILE" ]; then
+                rm -f "$NETWORK_EVENT_FILE" 2>/dev/null || true
+                break
+            fi
         fi
 
         sleep 1
