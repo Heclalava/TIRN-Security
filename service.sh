@@ -154,6 +154,7 @@ cleanup_stale_generated_files() {
             -o -name "network.state.current.*" \
             -o -name "network.state.transaction.tmp.*" \
             -o -name "network-event.monitor.*" \
+            -o -name "apps.identity.apphelper.*" \
         \) \
         -delete 2>/dev/null || true
 }

@@ -2,8 +2,6 @@
 
 MODDIR="${0%/*}"
 DATA_DIR="/data/adb/tirnsecurity"
-APPS_IDENTITY="$DATA_DIR/apps.identity"
-SERVICE="$MODDIR/service.sh"
 
 LOGCAT="/system/bin/logcat"
 PM="/system/bin/pm"
@@ -14,6 +12,7 @@ SED="/system/bin/sed"
 GREP="/system/bin/grep"
 SORT="/system/bin/sort"
 CAT="/system/bin/cat"
+CUT="/system/bin/cut"
 MV="/system/bin/mv"
 RM="/system/bin/rm"
 MKDIR="/system/bin/mkdir"
@@ -294,13 +293,7 @@ process_profile() {
     PACKAGE="$3"
 
     case "$ACTION" in
-        ADDED|REPLACED)
-            RESULT="$("$MODDIR/apphelper" "$ACTION" "$USER" "$PACKAGE" 2>&1)"
-            STATUS=$?
-            ;;
-        REMOVED)
-            RESULT="$("$MODDIR/apphelper" "$ACTION" "$USER" "$PACKAGE" 2>&1)"
-            STATUS=$?
+        ADDED|REPLACED|REMOVED)
             ;;
         *)
             log_error "Package" "Invalid action" \
@@ -308,6 +301,9 @@ process_profile() {
             return 1
             ;;
     esac
+
+    RESULT="$("$MODDIR/apphelper" "$ACTION" "$USER" "$PACKAGE" 2>&1)"
+    STATUS=$?
 
     if [ "$STATUS" -eq 0 ]; then
         RESULT_LINE="$(printf '%s\n' "$RESULT" | "$GREP" -E '^(ADDED|UPDATED|REMOVED|UNCHANGED)\|')"
@@ -321,13 +317,26 @@ process_profile() {
         RESULT_DETAIL="$(printf '%s\n' "$RESULT_LINE" | "$CUT" -d'|' -f2)"
 
         case "$RESULT_ACTION" in
-            ADDED|UPDATED|REMOVED)
+            ADDED)
+                case "$ACTION" in
+                    REPLACED)
+                        EVENT_ACTION="UNCHANGED"
+                        ;;
+                    *)
+                        EVENT_ACTION="ADDED"
+                        ;;
+                esac
+                ;;
+            UPDATED|REMOVED)
                 EVENT_ACTION="$RESULT_ACTION"
                 ;;
             UNCHANGED)
                 case "$RESULT_DETAIL" in
                     ADDED|UPDATED|REMOVED)
                         EVENT_ACTION="$RESULT_DETAIL"
+                        ;;
+                    REPLACED)
+                        EVENT_ACTION="UNCHANGED"
                         ;;
                 esac
                 ;;
