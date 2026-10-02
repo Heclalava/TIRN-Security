@@ -37,6 +37,21 @@ multiple Android user profiles and both IPv4 and IPv6.
 - Android device with working `iptables`/`ip6tables` firewall support
 - A modern web browser for the WebUI
 
+### Required Magisk Superuser settings
+
+The following **Magisk → Superuser** settings are required:
+
+**Multiuser mode**
+
+- **Each user has their own separate root rules**
+
+**Mount namespace mode**
+
+- **Root sessions will inherit their requester's namespace**
+
+These settings are required for TIRN Security's per-user application identity
+and firewall handling to operate correctly.
+
 TIRN Security is developed and tested on a rooted Google Pixel 8a.
 
 ## Installation
@@ -145,26 +160,97 @@ The WebUI also provides an option to clear all TIRN Security blocks.
 
 ## How TIRN Security works
 
-TIRN Security maintains its own firewall policy chains and uses
-them to apply application-specific network policies.
+TIRN Security maintains its own firewall policy chains and uses them to
+apply application-specific network policies.
 
-The primary TIRN Security chains are:
+The firewall is organized around a TIRN Security dispatcher and
+generation-based policy chains rather than directly modifying unrelated
+Android firewall rules.
 
-- `TIRNFW`
-- `TIRNFW-MOBILE`
-- `TIRNFW-WIFI`
-- `TIRNFW-LAN`
+Application policies are applied using the application's Android UID.
 
-IPv6 uses the corresponding TIRN Security-owned chains as well.
+Network state is tracked separately from application state. When the
+effective network configuration has not changed, TIRN Security does not
+create another firewall transaction unnecessarily.
 
-The main `TIRNFW` dispatcher determines the appropriate
-TIRN Security network policy chain based on the active network.
+Application package broadcasts are treated as events that trigger
+application-state processing. The authoritative application snapshot
+remains the source of application identity.
 
-Application policies are then applied using the application's
-Android UID.
+Application changes are compared using:
 
-This keeps TIRN Security's policy state separate from unrelated
-Android native firewall configuration.
+`user | package | UID`
+
+An event that does not produce an effective identity change does not
+require an unnecessary firewall generation.
+
+When an effective policy change is required, TIRN Security prepares a new
+firewall generation, verifies it before activation, and then atomically
+switches the active generation.
+
+This keeps policy changes isolated from unrelated Android firewall
+configuration while avoiding unnecessary firewall rebuilds.
+
+## Boot and state convergence
+
+TIRN Security is designed to converge safely after boot and network
+changes.
+
+For an existing installation, the previous valid application state can
+be used to establish the initial firewall state before the authoritative
+application refresh completes.
+
+The refreshed application state is then compared with the previous
+identity snapshot. A second firewall generation is only required when
+the effective application identity or policy state has actually changed.
+
+Network state is handled independently and is deduplicated against the
+persisted network state.
+
+This prevents unchanged application or network state from causing
+unnecessary firewall transactions.
+
+## Policy transaction safety
+
+Policy changes are handled through an authoritative transaction path.
+
+The same authoritative transaction path is used for:
+
+- Individual policy changes
+- Bulk policy changes
+- Clear-all
+- Policy import
+- Stale application reconciliation
+
+A candidate policy is validated before activation.
+
+The firewall generation is built and verified before it becomes active.
+Persistent policy state is also verified as part of the transaction.
+
+If a transaction cannot be completed safely, the existing valid state is
+retained or restored rather than leaving a partially applied policy
+active.
+
+The design is intended to preserve fail-closed behavior during
+unsuccessful or interrupted transactions.
+
+## Application identity and stale policies
+
+TIRN Security maintains an authoritative application identity snapshot
+in addition to the application metadata displayed by the WebUI.
+
+Application identity is based on the Android user/profile, package name,
+and UID.
+
+This allows application additions, removals, updates, replacements, and
+UID changes to be distinguished from events that do not actually change
+the effective application identity.
+
+If an existing policy becomes associated with a missing application or a
+changed UID, it can be identified as stale rather than silently
+reassigned to another application identity.
+
+Stale policies can then be reviewed and reconciled through the WebUI.
 
 ## Firewall scope and safety
 
@@ -177,8 +263,9 @@ Android firewall chains or rules.**
 The WebUI manages TIRN Security policy state rather than directly
 manipulating the device's native firewall configuration.
 
-Policy backup, import, and clear operations likewise operate only
-on TIRN Security policy entries.
+Policy backup, import, clear operations, application events, and
+network changes all converge through TIRN Security's policy and firewall
+transaction mechanisms.
 
 This separation is an important part of TIRN Security's design.
 
@@ -201,6 +288,32 @@ The main interface provides:
 - Policy status and blocked-rule count
 - Backup and restore controls
 - Clear-policy controls
+
+The WebUI communicates with TIRN Security through its local CGI interface.
+
+## Performance and resource usage
+
+TIRN Security's application, network, policy, and firewall processing has
+been optimized to avoid unnecessary repeated work.
+
+The implementation uses:
+
+- Incremental application processing where possible
+- Coalesced package-event handling
+- Authoritative application identity comparison
+- Network-state deduplication
+- Atomic policy transactions
+- Generation verification before activation
+- APK label caching
+- Removal of redundant refresh and generation paths
+- Cleanup of obsolete generated state
+
+Performance validation has included application refresh time, firewall
+generation activity, event processing, idle CPU usage, memory/process
+usage, and practical resource impact.
+
+The optimization work prioritizes eliminating unnecessary processing
+while preserving the safety and atomicity of the firewall architecture.
 
 ## Troubleshooting
 
@@ -246,6 +359,34 @@ networks.
 If a network transition appears to leave an application in the
 wrong state, first refresh the WebUI and verify the current policy.
 
+## Alpha Testing and Feedback
+
+TIRN Security is currently being released for alpha testing.
+
+Please report bugs and technical issues through the project's **GitHub
+Issues**.
+
+When reporting an issue, include as much of the following information as
+possible:
+
+- TIRN Security version
+- Android version
+- Device model
+- Magisk version
+- Steps to reproduce the problem
+- Expected behaviour
+- Actual behaviour
+- Relevant TIRN Security logs
+- Screenshots where applicable
+- The affected application, Android user/profile, and network type where
+  relevant
+
+For firewall or policy issues, include the policy configuration and
+network conditions involved where possible.
+
+GitHub Issues are the authoritative record for alpha-test bugs and
+technical issues.
+
 ## Development
 
 TIRN Security is developed as a Magisk module with its firewall
@@ -260,7 +401,7 @@ The project is developed and tested on-device using a rooted Pixel
 
 ## Project principles
 
-TIRN Security follows a few core principles:
+TIRN Security follows these core principles:
 
 1. **Application-level control**
 
@@ -283,7 +424,27 @@ TIRN Security follows a few core principles:
 
    TIRN Security operates only on its own firewall chains.
 
-6. **Simple management**
+6. **Atomic policy changes**
+
+   Firewall generations are built and verified before activation.
+
+7. **Fail-closed behavior**
+
+   Unsafe or incomplete firewall transactions do not intentionally
+   replace a known valid state with a partially applied policy.
+
+8. **Authoritative application state**
+
+   Application identity is determined from the authoritative application
+   snapshot rather than relying solely on package-event notifications.
+
+9. **Measured optimization**
+
+   Performance improvements are based on measured reductions in
+   unnecessary processing rather than added complexity without a
+   demonstrated benefit.
+
+10. **Simple management**
 
    The WebUI provides a straightforward way to inspect and change
    policies without requiring command-line interaction.
