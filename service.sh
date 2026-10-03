@@ -3056,16 +3056,20 @@ policy_generation_transaction() {
     fi
 
     POLICY_STATE_ROLLBACK_TMP="$DATA_DIR/policy.applied.rollback.$$"
+    POLICY_STATE_ROLLBACK_EXISTED=0
 
     cleanup_policy_state_rollback_tmp() {
         rm -f "$POLICY_STATE_ROLLBACK_TMP"
     }
 
-    if ! cp -f "$POLICY_STATE_FILE" "$POLICY_STATE_ROLLBACK_TMP"; then
-        log_error "Firewall" \
-            "policy.applied rollback backup creation failed" \
-            "generation=$NEW_GEN"
-        return 1
+    if [ -f "$POLICY_STATE_FILE" ]; then
+        if ! cp -f "$POLICY_STATE_FILE" "$POLICY_STATE_ROLLBACK_TMP"; then
+            log_error "Firewall" \
+                "policy.applied rollback backup creation failed" \
+                "generation=$NEW_GEN"
+            return 1
+        fi
+        POLICY_STATE_ROLLBACK_EXISTED=1
     fi
 
     if [ "$POLICY_STATE_TEST_FAIL" -eq 1 ] ||
@@ -3095,6 +3099,10 @@ policy_generation_transaction() {
             policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
         fi
 
+        if [ "$POLICY_STATE_ROLLBACK_EXISTED" -eq 0 ]; then
+            rm -f "$POLICY_STATE_FILE"
+        fi
+
         cleanup_policy_state_rollback_tmp
         return 1
     fi
@@ -3116,7 +3124,8 @@ policy_generation_transaction() {
             "policy.applied verification failed after commit" \
             "generation=$NEW_GEN"
 
-        if [ -f "$POLICY_STATE_ROLLBACK_TMP" ]; then
+        if [ "$POLICY_STATE_ROLLBACK_EXISTED" -eq 1 ] &&
+           [ -f "$POLICY_STATE_ROLLBACK_TMP" ]; then
             if ! cp -f "$POLICY_STATE_ROLLBACK_TMP" "$POLICY_STATE_FILE"; then
                 log_error "Firewall" \
                     "policy.applied rollback restore failed" \
@@ -3141,6 +3150,10 @@ policy_generation_transaction() {
 
             generation_guard_remove || true
             policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
+        fi
+
+        if [ "$POLICY_STATE_ROLLBACK_EXISTED" -eq 0 ]; then
+            rm -f "$POLICY_STATE_FILE"
         fi
 
         cleanup_policy_state_rollback_tmp
