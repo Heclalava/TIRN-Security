@@ -3,7 +3,7 @@
 MODPATH="${0%/*}"
 
 echo "========================================="
-echo "        PixelFirewall Verification"
+echo "        TIRN Security Verification"
 echo "========================================="
 
 FAILED=0

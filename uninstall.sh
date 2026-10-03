@@ -3,10 +3,10 @@
 IPTABLES="/system/bin/iptables"
 IP6TABLES="/system/bin/ip6tables"
 
-MAIN_CHAIN="PIXELFW"
-MOBILE_CHAIN="PIXELFW-MOBILE"
-WIFI_CHAIN="PIXELFW-WIFI"
-LAN_CHAIN="PIXELFW-LAN"
+MAIN_CHAIN="TIRNFW"
+MOBILE_CHAIN="TIRNFW-MOBILE"
+WIFI_CHAIN="TIRNFW-WIFI"
+LAN_CHAIN="TIRNFW-LAN"
 
 remove_chain() {
     TABLE="$1"
@@ -32,6 +32,6 @@ remove_firewall() {
 remove_firewall "$IPTABLES"
 remove_firewall "$IP6TABLES"
 
-rm -rf /data/adb/pixelfirewall
+rm -rf /data/adb/tirnsecurity
 
 exit 0

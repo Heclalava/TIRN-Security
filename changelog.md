@@ -1,3 +1,4 @@
-> Release Date: 11/03/2026
+> Release Date: 2026-10-03
 
-- Initial release
+- Patch alpha release of TIRN Security 1.0.1
+- Fixed fresh-install policy transaction when no previous policy.applied state exists

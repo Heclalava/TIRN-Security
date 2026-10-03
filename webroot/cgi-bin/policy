@@ -4,77 +4,209 @@ echo "Cache-Control: no-store, no-cache, must-revalidate, max-age=0"
 echo "Pragma: no-cache"
 echo "Expires: 0"
 echo
-DATA_DIR="/data/adb/pixelfirewall"
+
+DATA_DIR="/data/adb/tirnsecurity"
 POLICY="$DATA_DIR/policy.conf"
+APPS="$DATA_DIR/apps.json"
 TMP="$DATA_DIR/policy.cgi.$$"
+
+json_record_for_app() {
+    USER_VALUE="$1"
+    PACKAGE="$2"
+
+    [ -f "$APPS" ] || return 1
+
+    sed 's/},{/}\n{/g' "$APPS" | awk -v user="$USER_VALUE" -v pkg="$PACKAGE" '
+        index($0, "\"user\":\"" user "\"") &&
+        index($0, "\"pkg\":\"" pkg "\"") {
+            print
+            exit
+        }
+    '
+}
+
+resolve_app() {
+    USER_VALUE="$1"
+    PACKAGE="$2"
+
+    RECORD="$(json_record_for_app "$USER_VALUE" "$PACKAGE")"
+    [ -n "$RECORD" ] || return 1
+
+    UID_VALUE="$(printf '%s\n' "$RECORD" | sed -n 's/.*"uid":"\([0-9][0-9]*\)".*/\1/p')"
+    NAME="$(printf '%s\n' "$RECORD" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"
+
+    [ -n "$UID_VALUE" ] || return 1
+
+    RESOLVED_UID="$UID_VALUE"
+    RESOLVED_NAME="$NAME"
+    return 0
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
 
 if [ "$REQUEST_METHOD" = "GET" ]; then
     printf '{"status":"OK","rules":['
-    first=1
+
     if [ -f "$POLICY" ]; then
-        while IFS="|" read -r uid network action; do
-            [ -n "$uid" ] || continue
-            [ "$action" = "BLOCK" ] || continue
-            [ "$first" -eq 0 ] && printf ","
-            printf '{"uid":"%s","network":"%s","action":"BLOCK"}' "$uid" "$network"
-            first=0
-        done < "$POLICY"
+        cat "$APPS" | sed 's/},{/}\n{/g' | awk '
+            function json_escape(s,    t) {
+                t=s
+                gsub(/\\/, "\\\\", t)
+                gsub(/"/, "\\\"", t)
+                return t
+            }
+
+            FILENAME == "/dev/stdin" {
+                if (match($0, /"user":"[^"]+"/))
+                    user=substr($0,RSTART+8,RLENGTH-9)
+                else
+                    user=""
+
+                if (match($0, /"pkg":"[^"]+"/))
+                    pkg=substr($0,RSTART+7,RLENGTH-8)
+                else
+                    pkg=""
+
+                if (match($0, /"name":"[^"]+"/))
+                    name=substr($0,RSTART+8,RLENGTH-9)
+                else
+                    name=""
+
+                if (user != "" && pkg != "")
+                    app_name[user SUBSEP pkg]=name
+                next
+            }
+
+            FNR == 1 {
+                first=1
+            }
+
+            {
+                n=split($0,f,"|")
+
+                if (n == 5) {
+                    user=f[1]
+                    pkg=f[2]
+                    uid=f[3]
+                    network=f[4]
+                    action=f[5]
+
+                    if (action != "BLOCK")
+                        next
+
+                    if (!first)
+                        printf ","
+                    printf "{\"user\":\"%s\",\"pkg\":\"%s\",\"uid\":\"%s\",\"name\":\"%s\",\"network\":\"%s\",\"action\":\"BLOCK\"}",
+                        json_escape(user),
+                        json_escape(pkg),
+                        uid,
+                        json_escape(app_name[user SUBSEP pkg]),
+                        network
+                    first=0
+                }
+            }
+        ' /dev/stdin "$POLICY"
     fi
-    printf "]}
-"
+
+    printf ']}\n'
     exit 0
 fi
 
-[ "$REQUEST_METHOD" = "POST" ] || { printf '{"status":"ERROR","error":"Method not allowed"}
-'; exit 1; }
+[ "$REQUEST_METHOD" = "POST" ] || {
+    printf '{"status":"ERROR","error":"Method not allowed"}\n'
+    exit 1
+}
 
 BODY="$(cat)"
-uid="$(printf "%s" "$BODY" | sed -n 's/.*"uid"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)".*/\1/p')"
-network="$(printf "%s" "$BODY" | sed -n 's/.*"network"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p')"
-action="$(printf "%s" "$BODY" | sed -n 's/.*"action"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p')"
 
-case "$uid" in
-    ""|*[!0-9]*) printf '{"status":"ERROR","error":"Invalid UID"}
-'; exit 1 ;;
+user="${BODY#*user=}"
+user="${user%%&*}"
+
+pkg="${BODY#*pkg=}"
+pkg="${pkg%%&*}"
+
+network="${BODY#*network=}"
+network="${network%%&*}"
+
+action="${BODY#*action=}"
+action="${action%%&*}"
+case "$user" in
+    ""|*[!0-9]*) printf '{"status":"ERROR","error":"Invalid user"}\n'; exit 1 ;;
 esac
 
-case "$uid" in
-    0|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]|[0-9][0-9][0-9][0-9]) printf '{"status":"ERROR","error":"Invalid UID"}
-'; exit 1 ;;
+case "$pkg" in
+    ""|*[!A-Za-z0-9._-]*) printf '{"status":"ERROR","error":"Invalid package"}\n'; exit 1 ;;
 esac
 
 case "$network" in
     MOBILE|WIFI|LAN) ;;
-    *) printf '{"status":"ERROR","error":"Invalid network"}
-'; exit 1 ;;
+    *) printf '{"status":"ERROR","error":"Invalid network"}\n'; exit 1 ;;
 esac
 
 case "$action" in
     BLOCK|ALLOW) ;;
-    *) printf '{"status":"ERROR","error":"Invalid action"}
-'; exit 1 ;;
+    *) printf '{"status":"ERROR","error":"Invalid action"}\n'; exit 1 ;;
 esac
 
-touch "$POLICY" || { printf '{"status":"ERROR","error":"Policy unavailable"}
-'; exit 1; }
+resolve_app "$user" "$pkg" || {
+    printf '{"status":"ERROR","error":"Application not found"}\n'
+    exit 1
+}
+
+UID_VALUE="$RESOLVED_UID"
+
+case "$UID_VALUE" in
+    ""|*[!0-9]*) printf '{"status":"ERROR","error":"Invalid resolved UID"}\n'; exit 1 ;;
+esac
+
+[ "$UID_VALUE" -ge 1 ] && [ "$UID_VALUE" -le 2147483647 ] || {
+    printf '{"status":"ERROR","error":"Invalid resolved UID"}\n'
+    exit 1
+}
+
+LOCK="$DATA_DIR/policy.lock"
+LOCK_WAIT=0
+
+while ! mkdir "$LOCK" 2>/dev/null; do
+    sleep 0.05
+    LOCK_WAIT=$((LOCK_WAIT + 1))
+    if [ "$LOCK_WAIT" -ge 200 ]; then
+        printf '{"status":"ERROR","error":"Policy busy"}\n'
+        exit 1
+    fi
+done
+
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+touch "$POLICY" || {
+    printf '{"status":"ERROR","error":"Policy unavailable"}\n'
+    exit 1
+}
+
 chmod 600 "$POLICY"
 
-awk -F "|" -v uid="$uid" -v network="$network" '!($1 == uid && $2 == network && $3 == "BLOCK")' "$POLICY" > "$TMP" || {
+awk -F "|" \
+    -v user="$user" \
+    -v pkg="$pkg" \
+    -v network="$network" '
+    NF == 5 && !($1 == user && $2 == pkg && $4 == network && $5 == "BLOCK") {
+        print
+    }
+' "$POLICY" > "$TMP" || {
     rm -f "$TMP"
-    printf '{"status":"ERROR","error":"Policy read failed"}
-'
+    printf '{"status":"ERROR","error":"Policy read failed"}\n'
     exit 1
 }
 
 if [ "$action" = "BLOCK" ]; then
-    printf "%s|%s|BLOCK
-" "$uid" "$network" >> "$TMP"
+    printf '%s|%s|%s|%s|BLOCK\n' "$user" "$pkg" "$UID_VALUE" "$network" >> "$TMP"
 fi
 
 sort -u "$TMP" > "${TMP}.sorted" || {
     rm -f "$TMP" "${TMP}.sorted"
-    printf '{"status":"ERROR","error":"Policy update failed"}
-'
+    printf '{"status":"ERROR","error":"Policy update failed"}\n'
     exit 1
 }
 
@@ -82,10 +214,11 @@ chmod 600 "${TMP}.sorted"
 
 mv -f "${TMP}.sorted" "$POLICY" || {
     rm -f "$TMP" "${TMP}.sorted"
-    printf '{"status":"ERROR","error":"Policy update failed"}
-'
+    printf '{"status":"ERROR","error":"Policy update failed"}\n'
     exit 1
 }
+
 rm -f "$TMP"
-printf '{"status":"OK"}
-'
+
+printf '{"status":"OK","user":"%s","pkg":"%s","uid":"%s"}\n' \
+    "$user" "$pkg" "$UID_VALUE"

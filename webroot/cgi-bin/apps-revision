@@ -1,5 +1,4 @@
 #!/system/bin/sh
-
 echo "Content-Type: application/json"
 echo "Cache-Control: no-store, no-cache, must-revalidate, max-age=0"
 echo "Pragma: no-cache"
@@ -9,7 +8,12 @@ echo
 CACHE="/data/adb/tirnsecurity/apps.json"
 
 if [ -f "$CACHE" ]; then
-    cat "$CACHE"
+    MTIME=$(/system/bin/stat -c '%Y' "$CACHE" 2>/dev/null)
+    case "$MTIME" in
+        ''|*[!0-9]*) printf '{"status":"ERROR","error":"Cannot read apps cache revision"}\n'; exit 1 ;;
+    esac
+    printf '{"status":"OK","revision":%s}\n' "$MTIME"
 else
     printf '{"status":"ERROR","error":"Apps cache not found"}\n'
+    exit 1
 fi

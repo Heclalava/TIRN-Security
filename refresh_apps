@@ -1,17 +1,133 @@
 #!/system/bin/sh
 
 PM="/system/bin/pm"
-DATA_DIR="/data/adb/pixelfirewall"
+DATA_DIR="/data/adb/tirnsecurity"
 CACHE="$DATA_DIR/apps.json"
+LOCK="$DATA_DIR/apps.lock"
+. "$DATA_DIR/app-common.sh" 2>/dev/null || exit 1
 TMP="$DATA_DIR/apps.json.$$"
 USERS="$DATA_DIR/users.$$"
 LABELS="$DATA_DIR/labels.conf"
-APK_LABEL="/data/adb/modules/pixelfirewall/apklabel"
+APK_LABEL="/data/adb/modules/tirnsecurity/apklabel"
 APK_LABELS="$DATA_DIR/apklabels.$$"
+APK_PATHS="$DATA_DIR/apkpaths.$$"
+APK_LABEL_CACHE="$DATA_DIR/apk-label-cache.$$"
+APK_LABEL_STORE="$DATA_DIR/apk-label-store"
+APK_LABEL_STORE_TMP="$APK_LABEL_STORE.$$"
+APK_LABEL_STORE_VERSION="1"
+APK_LABEL_STORE_HEADER=""
+APK_LABEL_META="$DATA_DIR/apk-label-meta.$$"
+APK_LABEL_RESULTS="$DATA_DIR/apk-label-results.$$"
+APK_LABEL_RESOLVED="$DATA_DIR/apk-label-resolved.$$"
+APK_UNIQUE="$DATA_DIR/apk-unique.$$"
+ELIGIBLE_PKGS="$DATA_DIR/eligible-pkgs.$$"
+IDENTITY_TMP="$DATA_DIR/apps.identity.$$"
+IDENTITY_RAW="$DATA_DIR/apps.identity.raw.$$"
+IDENTITY="$DATA_DIR/apps.identity"
+PROGRESS="$DATA_DIR/apps-refresh-progress"
+PROGRESS_TMP="$PROGRESS.$$"
+PROGRESS_ACTIVE=0
+REFRESH_START="$(date +%s)"
 
-trap 'rm -f "$TMP" "$USERS" "$APK_LABELS" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]*' EXIT
+. "/data/adb/modules/tirnsecurity/logging-common.sh"
+AUDIT_LOG="$DATA_DIR/service.log"
+
+write_progress() {
+    STATE="$1"
+    PROCESSED="$2"
+    TOTAL="$3"
+    printf '{"status":"%s","processed":%s,"total":%s}\n' "$STATE" "$PROCESSED" "$TOTAL" > "$PROGRESS_TMP" &&
+    mv -f "$PROGRESS_TMP" "$PROGRESS"
+}
+
 
 mkdir -p "$DATA_DIR" || exit 1
+
+TIRN_LOCALE="$(/system/bin/getprop persist.sys.locale 2>/dev/null)"
+export TIRN_LOCALE
+
+get_proc_start() {
+    PID="$1"
+    STAT="/proc/$PID/stat"
+    [ -r "$STAT" ] || return 1
+    /system/bin/sed 's/.*) //' "$STAT" 2>/dev/null |
+        /system/bin/awk '{print $20}'
+}
+
+LOCK_OWNER="$LOCK/owner"
+
+acquire_apps_lock() {
+    if mkdir "$LOCK" 2>/dev/null; then
+        SELF_START="$(get_proc_start "$$")" || {
+            rmdir "$LOCK" 2>/dev/null
+            return 1
+        }
+        printf '%s %s\n' "$$" "$SELF_START" > "$LOCK_OWNER" || {
+            rm -f "$LOCK_OWNER" 2>/dev/null
+            rmdir "$LOCK" 2>/dev/null
+            return 1
+        }
+        return 0
+    fi
+
+    [ -r "$LOCK_OWNER" ] || return 2
+
+    read -r LOCK_PID LOCK_START < "$LOCK_OWNER" || return 2
+
+    case "$LOCK_PID" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+
+    case "$LOCK_START" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+
+    CURRENT_START="$(get_proc_start "$LOCK_PID")" || {
+        rm -f "$LOCK_OWNER" 2>/dev/null || return 2
+        rmdir "$LOCK" 2>/dev/null || return 2
+        if mkdir "$LOCK" 2>/dev/null; then
+            SELF_START="$(get_proc_start "$$")" || {
+                rmdir "$LOCK" 2>/dev/null
+                return 1
+            }
+            printf '%s %s\n' "$$" "$SELF_START" > "$LOCK_OWNER" || {
+                rm -f "$LOCK_OWNER" 2>/dev/null
+                rmdir "$LOCK" 2>/dev/null
+                return 1
+            }
+            return 0
+        fi
+        return 2
+    }
+
+    [ "$CURRENT_START" = "$LOCK_START" ] && return 2
+
+    rm -f "$LOCK_OWNER" 2>/dev/null || return 2
+    rmdir "$LOCK" 2>/dev/null || return 2
+
+    if mkdir "$LOCK" 2>/dev/null; then
+        SELF_START="$(get_proc_start "$$")" || {
+            rmdir "$LOCK" 2>/dev/null
+            return 1
+        }
+        printf '%s %s\n' "$$" "$SELF_START" > "$LOCK_OWNER" || {
+            rm -f "$LOCK_OWNER" 2>/dev/null
+            rmdir "$LOCK" 2>/dev/null
+            return 1
+        }
+        return 0
+    fi
+
+    return 2
+}
+
+if ! acquire_apps_lock; then
+    echo "Apps cache busy" >&2
+    exit 2
+fi
+
+trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; if [ "$TIRN_REFRESH_SOURCE" = "UI" ]; then REFRESH_DURATION=$(( $(date +%s) - REFRESH_START )); if [ "$STATUS" -eq 0 ]; then log_info "Apps" "Cache manually refreshed" "UI refresh duration=${REFRESH_DURATION}s"; else log_error "Apps" "Cache refresh failed" "UI refresh duration=${REFRESH_DURATION}s status=ERROR"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_LABEL_META" "$APK_LABEL_RESULTS" "$APK_LABEL_RESOLVED" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$IDENTITY_TMP" "$IDENTITY_RAW" "$PROGRESS_TMP" "$APK_LABEL_STORE_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
+
 
 "$PM" list users 2>/dev/null |
 /system/bin/sed -n 's/.*UserInfo{\([0-9][0-9]*\):\([^:}]*\):.*/\1|\2/p' |
@@ -37,6 +153,9 @@ first=1
 
 : > "$APK_LABELS"
 
+"$PM" list packages -f -U 2>/dev/null |
+/system/bin/sed -n 's/^package:\(.*\.apk\)=\([^ ]*\).*/\2|\1/p' > "$APK_PATHS"
+
 for user in $(/system/bin/cut -d'|' -f1 "$USERS")
 do
     [ -z "$user" ] && continue
@@ -51,33 +170,239 @@ do
     "$PM" list packages --user "$user" -U 2>/dev/null |
     /system/bin/sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\)$/\1|\2/p' |
     /system/bin/sed "s/$/|$user/" > "$PKGS"
+done
 
-    while IFS='|' read -r pkg uid appuser
-    do
-        [ -z "$pkg" ] && continue
+# Build eligible package records and the unique APK set.
+# APK_PATHS is loaded once per user-pass instead of performing one AWK
+# lookup for every package.
+: > "$APK_UNIQUE"
+: > "$ELIGIBLE_PKGS"
 
-        case "$uid" in
-            0|1000|1001|2000) continue ;;
-        esac
+for user in $(/system/bin/cut -d'|' -f1 "$USERS")
+do
+    [ -z "$user" ] && continue
 
-        apk=$("$PM" path "$pkg" 2>/dev/null |
-            /system/bin/sed -n 's/^package:\(.*\/base\.apk\)$/\1/p' |
-            /system/bin/head -n 1)
+    PKGS="$DATA_DIR/packages.$user"
 
-        [ -z "$apk" ] && continue
+    /system/bin/awk -F'|' -v apkfile="$APK_PATHS" '
+        BEGIN {
+            while ((getline line < apkfile) > 0) {
+                split(line, a, "|")
+                if (a[1] != "" && a[2] != "")
+                    apk[a[1]] = a[2]
+            }
+            close(apkfile)
+        }
 
-        if [ -x "$APK_LABEL" ]; then
-            name=$("$APK_LABEL" "$apk" 2>/dev/null)
-            case "$name" in
-                *"
+        {
+            pkg=$1
+            uid=$2
+            appuser=$3
+
+            if (pkg == "")
+                next
+
+            if (uid == "0" || uid == "1000" || uid == "1001" || uid == "2000")
+                next
+
+            if (!(pkg in apk))
+                next
+
+            printf "%s|%s|%s|%s\n", pkg, uid, appuser, apk[pkg]
+        }
+    ' "$PKGS" >> "$ELIGIBLE_PKGS"
+done
+
+/system/bin/cut -d'|' -f4 "$ELIGIBLE_PKGS" |
+/system/bin/sort -u > "$APK_UNIQUE"
+
+
+PROGRESS_TOTAL=$(/system/bin/wc -l < "$APK_UNIQUE")
+case "$PROGRESS_TOTAL" in
+    ''|*[!0-9]*) exit 1 ;;
+esac
+PROGRESS_PROCESSED=0
+PROGRESS_ACTIVE=1
+write_progress "RUNNING" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"
+
+: > "$APK_LABEL_CACHE"
+: > "$APK_LABEL_META"
+: > "$APK_LABEL_RESULTS"
+
+# Persistent cache identity:
+#   cache format version
+#   locale
+#   apk-label resolver identity
+# Individual APK entries are additionally keyed by:
+#   path + inode + size + mtime
+TIRN_APK_LABEL_LOCALE="${LC_ALL:-${LC_MESSAGES:-${LANG:-C}}}"
+APK_LABEL_RESOLVER_SIG="$(/system/bin/stat -c '%i|%s|%Y' "$APK_LABEL" 2>/dev/null)" || exit 1
+[ -n "$APK_LABEL_RESOLVER_SIG" ] || exit 1
+
+APK_LABEL_STORE_HEADER="TIRN_APK_LABEL_CACHE|$APK_LABEL_STORE_VERSION|$TIRN_APK_LABEL_LOCALE|$APK_LABEL_RESOLVER_SIG"
+
+TAB="$(printf '\t')"
+
+while IFS= read -r apk
+do
+    [ -z "$apk" ] && continue
+    /system/bin/stat -c "%n${TAB}%i${TAB}%s${TAB}%Y" "$apk" >> "$APK_LABEL_META" || exit 1
+done < "$APK_UNIQUE"
+
+# A cache is reusable only when its global identity matches.
+CACHE_VALID=0
+if [ -s "$APK_LABEL_STORE" ]; then
+    CACHE_HEADER="$(/system/bin/head -n 1 "$APK_LABEL_STORE")"
+    [ "$CACHE_HEADER" = "$APK_LABEL_STORE_HEADER" ] && CACHE_VALID=1
+fi
+
+# Produce current APK records with either a cached result or PENDING.
+# Fields:
+# path | inode | size | mtime | status | label
+/system/bin/awk -F '\t' \
+    -v valid="$CACHE_VALID" \
+    -v cache="$APK_LABEL_STORE" '
+    BEGIN {
+        if (valid) {
+            while ((getline line < cache) > 0) {
+                if (line ~ /^TIRN_APK_LABEL_CACHE\|/)
+                    continue
+
+                split(line, a, "\t")
+
+                if (a[1] != "" && a[2] != "" && a[3] != "" && a[4] != "" && a[5] != "")
+                    old[a[1] SUBSEP a[2] SUBSEP a[3] SUBSEP a[4]] = line
+            }
+            close(cache)
+        }
+    }
+
+    {
+        key=$1 SUBSEP $2 SUBSEP $3 SUBSEP $4
+
+        if (key in old) {
+            print old[key]
+        } else {
+            print $0 "\tPENDING\t"
+        }
+    }
+' "$APK_LABEL_META" > "$APK_LABEL_RESULTS"
+
+# Build the replacement store separately, then atomically replace
+# the persistent cache after all current APKs have been processed.
+: > "$APK_LABEL_STORE_TMP"
+printf '%s\n' "$APK_LABEL_STORE_HEADER" >> "$APK_LABEL_STORE_TMP"
+
+# Resolve only entries that were not already present in the label cache.
+# All normal SUCCESS/FAILURE records are processed in one awk pass below.
+: > "$APK_LABEL_RESOLVED" || exit 1
+
+while IFS="$(printf '\t')" read -r apk inode size mtime status label
+do
+    [ -z "$apk" ] && continue
+    [ "$status" = "PENDING" ] || continue
+
+    name="$(get_apk_label "$apk")"
+
+    case "$name" in
+        *"
 "*|*"	"*) name="" ;;
-            esac
+    esac
 
-            if [ -n "$name" ]; then
-                printf '%s|%s\n' "$pkg" "$name" >> "$APK_LABELS"
-            fi
-        fi
-    done < "$PKGS"
+    if [ -n "$name" ]; then
+        printf '%s\tSUCCESS\t%s\n' "$apk" "$name" >> "$APK_LABEL_RESOLVED"
+    else
+        printf '%s\tFAILURE\t\n' "$apk" >> "$APK_LABEL_RESOLVED"
+    fi
+done < "$APK_LABEL_RESULTS"
+
+PROGRESS_PROCESSED=0
+
+/system/bin/awk -F'\t' '
+BEGIN {
+    while ((getline line < "'"$APK_LABEL_RESOLVED"'") > 0) {
+        split(line, r, "\t")
+        resolved[r[1]] = r[2]
+        resolved_label[r[1]] = r[3]
+    }
+    close("'"$APK_LABEL_RESOLVED"'")
+}
+{
+    apk = $1
+    inode = $2
+    size = $3
+    mtime = $4
+    status = $5
+    label = $6
+
+    if (status == "SUCCESS") {
+        printf "%s\t%s\t%s\t%s\tSUCCESS\t%s\n", \
+            apk, inode, size, mtime, label >> "'"$APK_LABEL_STORE_TMP"'"
+        printf "%s|%s\n", apk, label >> "'"$APK_LABEL_CACHE"'"
+    }
+    else if (status == "FAILURE") {
+        printf "%s\t%s\t%s\t%s\tFAILURE\t\n", \
+            apk, inode, size, mtime >> "'"$APK_LABEL_STORE_TMP"'"
+    }
+    else if (status == "PENDING") {
+        if (resolved[apk] == "SUCCESS") {
+            printf "%s\t%s\t%s\t%s\tSUCCESS\t%s\n", \
+                apk, inode, size, mtime, resolved_label[apk] >> "'"$APK_LABEL_STORE_TMP"'"
+            printf "%s|%s\n", apk, resolved_label[apk] >> "'"$APK_LABEL_CACHE"'"
+        }
+        else {
+            printf "%s\t%s\t%s\t%s\tFAILURE\t\n", \
+                apk, inode, size, mtime >> "'"$APK_LABEL_STORE_TMP"'"
+        }
+    }
+
+    processed++
+    if (processed % 5 == 0 || processed == '"$PROGRESS_TOTAL"')
+        printf "PROGRESS|%d|%d\n", processed, '"$PROGRESS_TOTAL"'
+}
+' "$APK_LABEL_RESULTS" |
+while IFS='|' read -r marker processed total
+do
+    [ "$marker" = "PROGRESS" ] || continue
+    PROGRESS_PROCESSED="$processed"
+    write_progress "RUNNING" "$processed" "$total"
+done
+
+rm -f "$APK_LABEL_RESOLVED"
+
+mv -f "$APK_LABEL_STORE_TMP" "$APK_LABEL_STORE" || exit 1
+
+
+/system/bin/awk -F'|' '
+    NR == FNR {
+        apk_path[$1] = $2
+        next
+    }
+
+    FILENAME == ARGV[2] {
+        if ($1 != "" && $2 != "")
+            apk_label[$1] = $2
+        next
+    }
+
+    {
+        pkg = $1
+        apk = $4
+
+        if (pkg != "" && apk != "" && (apk in apk_label))
+            print pkg "|" apk_label[apk]
+    }
+' "$APK_PATHS" "$APK_LABEL_CACHE" "$ELIGIBLE_PKGS" > "$APK_LABELS"
+
+: > "$IDENTITY_RAW" || exit 1
+
+for user in $(/system/bin/cut -d'|' -f1 "$USERS")
+do
+    [ -z "$user" ] && continue
+
+    SYSTEMS="$DATA_DIR/systems.$user"
+    PKGS="$DATA_DIR/packages.$user"
+    OUT="$DATA_DIR/apps.$user"
 
     /system/bin/awk -F'|' '
         BEGIN {
@@ -96,6 +421,9 @@ do
             }
             close(ARGV[4])
             delete ARGV[4]
+
+            identity_file = ARGV[5]
+            delete ARGV[5]
 
             first = 1
         }
@@ -154,10 +482,11 @@ do
                 printf ","
 
             printf "{\"user\":\"%s\",\"uid\":\"%s\",\"pkg\":\"%s\",\"name\":\"%s\",\"system\":%s}", appuser, uid, pkg, name, is_system
+            printf "%s|%s|%s\n", appuser, pkg, uid >> identity_file
 
             first = 0
         }
-    ' "$SYSTEMS" "$PKGS" "$LABELS" "$APK_LABELS" > "$OUT"
+    ' "$SYSTEMS" "$PKGS" "$LABELS" "$APK_LABELS" "$IDENTITY_RAW" > "$OUT"
 
     if [ -s "$OUT" ]; then
         if [ "$first" -eq 0 ]; then
@@ -171,8 +500,24 @@ done
 
 printf ']}\n' >> "$TMP"
 
+/system/bin/awk -F'|' '
+    NF != 3 ||
+    $1 == "" || $2 == "" || $3 == "" ||
+    $1 !~ /^[0-9]+$/ ||
+    $2 !~ /^[A-Za-z0-9._]+$/ ||
+    $3 !~ /^[0-9]+$/ {
+        exit 1
+    }
+' "$IDENTITY_RAW" || exit 1
+
+/system/bin/sort -t'|' -k1,1n -k2,2 -k3,3n -u \
+    "$IDENTITY_RAW" > "$IDENTITY_TMP" || exit 1
+
 mv -f "$TMP" "$CACHE" || exit 1
 
 chmod 644 "$CACHE"
+
+chmod 644 "$IDENTITY_TMP" || exit 1
+mv -f "$IDENTITY_TMP" "$IDENTITY" || exit 1
 
 echo "Apps cache refreshed"

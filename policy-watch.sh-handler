@@ -1,10 +1,31 @@
 #!/system/bin/sh
 MODDIR="${0%/*}"
+DATA_DIR="/data/adb/tirnsecurity"
 SERVICE="$MODDIR/service.sh"
+IMPORT_MARKER="$DATA_DIR/policy.importing"
+POLICY_FILE="$DATA_DIR/policy.conf"
+POLICY_STATE_FILE="$DATA_DIR/policy.applied"
 
-[ "$1" = "y" ] || exit 0
-[ "$3" = "policy.conf" ] || exit 0
+if [ "$1" = "y" ] && [ "$3" = "policy.conf" ]; then
+    WAIT=0
 
-/system/bin/sh "$SERVICE" --policy-event
+    while [ -e "$IMPORT_MARKER" ]; do
+        sleep 0.05
+        WAIT=$((WAIT + 1))
+
+        if [ "$WAIT" -ge 200 ]; then
+            exit 0
+        fi
+    done
+
+    if [ -f "$POLICY_FILE" ] &&
+       [ -f "$POLICY_STATE_FILE" ] &&
+       cmp -s "$POLICY_FILE" "$POLICY_STATE_FILE"; then
+        exit 0
+    fi
+
+    /system/bin/sh "$SERVICE" --policy-event
+    exit 0
+fi
 
 exit 0

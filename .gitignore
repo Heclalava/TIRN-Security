@@ -1,0 +1,21 @@
+# Local build artifacts
+/tools/apklabel/apklabel
+/tools/apklabel/apklabel-arm64
+/tools/apphelper/apphelper-arm64
+/tools/appaudit/appaudit-arm64
+/tools/apphelper/apklabel-arm64
+
+# Local test backups and generated release artifacts
+*.before-*
+/backups/
+/TIRN-Security-install.zip
+
+/TIRN-Security-ui-polish-rc1-37-g170e54f-runtime-install.zip
+
+# Local development/recovery backups
+/webroot/cgi-bin/*.before-*
+/webroot/ui.before-*
+/*.pre-*
+/webroot/cgi-bin/*.pre-*
+/tirn-atomic-backup/
+TIRN-Security-new-engine-test-b71bd34-runtime-install.zip

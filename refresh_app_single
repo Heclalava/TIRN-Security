@@ -1,0 +1,99 @@
+#!/system/bin/sh
+
+MODDIR="${0%/*}"
+DATA_DIR="/data/adb/tirnsecurity"
+PM="/system/bin/pm"
+AWK="/system/bin/awk"
+SED="/system/bin/sed"
+SORT="/system/bin/sort"
+HEAD="/system/bin/head"
+
+USER="$1"
+PACKAGE="$2"
+
+case "$USER" in
+    ''|*[!0-9]*)
+        printf 'STATUS|INVALID_USER\n'
+        exit 2
+        ;;
+esac
+
+case "$PACKAGE" in
+    ''|*[!A-Za-z0-9._]*)
+        printf 'STATUS|INVALID_PACKAGE\n'
+        exit 2
+        ;;
+esac
+
+SYSTEMS="$DATA_DIR/refresh-app-single.systems.$$"
+trap 'rm -f "$SYSTEMS"' EXIT HUP INT TERM
+
+# Query only the requested package, then exact-match the package field.
+# pm may return prefix matches for a package argument.
+UIDS="$("$PM" list packages --user "$USER" -U "$PACKAGE" 2>/dev/null |
+    "$AWK" -v p="$PACKAGE" '
+        $1 == ("package:" p) && $2 ~ /^uid:[0-9]+$/ {
+            sub(/^uid:/, "", $2)
+            print $2
+        }
+    ' |
+    "$SORT" -u)"
+
+UID="$(printf '%s\n' "$UIDS" | "$HEAD" -n 1)"
+UID2="$(printf '%s\n' "$UIDS" | "$SED" -n '2p')"
+
+if [ -z "$UID" ]; then
+    printf 'STATUS|NOT_INSTALLED|%s|%s\n' "$USER" "$PACKAGE"
+    exit 3
+fi
+
+if [ -n "$UID2" ]; then
+    printf 'STATUS|CONFLICTING_UID|%s|%s|%s|%s\n' "$USER" "$PACKAGE" "$UID" "$UID2"
+    exit 4
+fi
+
+case "$UID" in
+    ''|*[!0-9]*)
+        printf 'STATUS|INVALID_UID|%s|%s|%s\n' "$USER" "$PACKAGE" "$UID"
+        exit 5
+        ;;
+esac
+
+case "$UID" in
+    0|1000|1001|2000)
+        printf 'STATUS|IGNORED_UID|%s|%s|%s\n' "$USER" "$UID" "$PACKAGE"
+        exit 0
+        ;;
+esac
+
+# Resolve the APK using the same package/APK lookup semantics as
+# refresh_apps, restricted to the requested package.
+APK="$("$PM" list packages -f -U 2>/dev/null |
+    "$SED" -n 's/^package:\(.*\.apk\)=\([^ ]*\).*/\2|\1/p' |
+    "$AWK" -F'|' -v p="$PACKAGE" '$1 == p { print $2; exit }')"
+
+if [ -z "$APK" ]; then
+    printf 'STATUS|APK_NOT_FOUND|%s|%s|%s\n' "$USER" "$UID" "$PACKAGE"
+    exit 6
+fi
+
+# Query only whether this exact package is a system package for this profile.
+: > "$SYSTEMS"
+"$PM" list packages -s --user "$USER" "$PACKAGE" 2>/dev/null |
+    "$AWK" -v p="$PACKAGE" '$1 == ("package:" p) { print p; exit }' > "$SYSTEMS"
+
+. "$MODDIR/app-common.sh" || {
+    printf 'STATUS|COMMON_LOAD_FAILED\n'
+    exit 7
+}
+
+RECORD="$(build_app_record "$USER" "$UID" "$PACKAGE" "$SYSTEMS" "$APK")"
+
+if [ -z "$RECORD" ]; then
+    printf 'STATUS|NO_RECORD|%s|%s|%s\n' "$USER" "$UID" "$PACKAGE"
+    exit 8
+fi
+
+printf 'STATUS|OK\n'
+printf 'RECORD|%s\n' "$RECORD"
+printf 'IDENTITY|%s|%s|%s\n' "$USER" "$UID" "$PACKAGE"

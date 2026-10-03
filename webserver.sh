@@ -1,6 +1,6 @@
 #!/system/bin/sh
 MODDIR="${0%/*}"
-DATA_DIR="/data/adb/pixelfirewall"
+DATA_DIR="/data/adb/tirnsecurity"
 HTTPD="/data/adb/magisk/busybox"
 PORT=8765
 PIDFILE="$DATA_DIR/httpd.pid"
@@ -10,6 +10,15 @@ mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
 if "$HTTPD" netstat -lnt 2>/dev/null | /system/bin/grep -q "127.0.0.1:$PORT "; then
+    PID=$("$HTTPD" ps 2>/dev/null | /system/bin/grep "httpd -p 127.0.0.1:$PORT" | /system/bin/grep -v grep | /system/bin/awk "{print \$1}" | /system/bin/head -1)
+
+    if [ -n "$PID" ]; then
+        echo "$PID" > "$PIDFILE"
+        chmod 600 "$PIDFILE"
+    else
+        rm -f "$PIDFILE"
+    fi
+
     exit 0
 fi
 

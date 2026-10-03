@@ -1,0 +1,17 @@
+#!/system/bin/sh
+MODDIR="/data/adb/modules/tirnsecurity"
+DATA_DIR="/data/adb/tirnsecurity"
+SERVICE_LOG="$DATA_DIR/service.log"
+umask 077
+. "$MODDIR/logging-common.sh"
+echo "Content-Type: application/json"
+echo "Cache-Control: no-store, no-cache, must-revalidate, max-age=0"
+echo "Pragma: no-cache"
+echo "Expires: 0"
+echo
+if ! : > "$SERVICE_LOG" 2>/dev/null; then
+    log_error "Logs" "System log clear failed" "service.log"
+    printf '%s\n' '{"status":"ERROR","error":"Unable to clear service.log"}'
+    exit 1
+fi
+printf '%s\n' '{"status":"OK","message":"service.log cleared"}'

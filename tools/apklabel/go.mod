@@ -1,4 +1,4 @@
-module pixelfirewall/apklabel
+module tirnsecurity/apklabel
 
 go 1.22.2
 
