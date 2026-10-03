@@ -361,7 +361,7 @@ wrong state, first refresh the WebUI and verify the current policy.
 
 ## Alpha Testing and Feedback
 
-TIRN Security is currently being released for alpha testing.
+TIRN Security 1.0.0 is an alpha release intended for testing and feedback.
 
 Please report bugs and technical issues through the project's **GitHub
 Issues**.

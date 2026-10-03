@@ -1,3 +1,3 @@
-> Release Date: 11/03/2026
+> Release Date: 2026-10-03
 
-- Initial release
+- Initial alpha release of TIRN Security 1.0.0
