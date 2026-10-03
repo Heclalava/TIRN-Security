@@ -3095,6 +3095,7 @@ policy_generation_transaction() {
             policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
         fi
 
+        cleanup_policy_state_rollback_tmp
         return 1
     fi
 
@@ -3142,6 +3143,7 @@ policy_generation_transaction() {
             policy_generation_cleanup_new "$NEW_GEN" >/dev/null 2>&1 || true
         fi
 
+        cleanup_policy_state_rollback_tmp
         return 1
     fi
 
