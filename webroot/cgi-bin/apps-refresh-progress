@@ -10,12 +10,21 @@ DATA_DIR="/data/adb/tirnsecurity"
 PROGRESS="$DATA_DIR/apps-refresh-progress"
 LOCK="$DATA_DIR/apps.lock"
 
+if [ -x /system/bin/awk ]; then
+    AWK="/system/bin/awk"
+elif [ -x /system/xbin/awk ]; then
+    AWK="/system/xbin/awk"
+else
+    printf '{"status":"ERROR","message":"AWK unavailable"}\n'
+    exit 1
+fi
+
 if [ ! -f "$PROGRESS" ]; then
     printf '{"status":"IDLE","processed":0,"total":0}\n'
     exit 0
 fi
 
-STATUS=$(/system/bin/awk -F'"' '/"status"/ {print $4; exit}' "$PROGRESS" 2>/dev/null)
+STATUS=$("$AWK" -F'"' '/"status"/ {print $4; exit}' "$PROGRESS" 2>/dev/null)
 
 case "$STATUS" in
     RUNNING)
