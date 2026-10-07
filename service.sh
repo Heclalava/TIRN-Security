@@ -69,6 +69,7 @@ detect_iptables_wait_mode() {
 
 # Atomic firewall transaction lock. This is separate from policy.lock.
 FIREWALL_LOCK="$DATA_DIR/firewall.lock"
+APP_WATCH_LOCK="$DATA_DIR/app-watch.lock"
 FIREWALL_LOCK_OWNER="$FIREWALL_LOCK/owner"
 
 acquire_firewall_lock() {
@@ -144,7 +145,7 @@ release_policy_lock() {
 }
 
 clear_stale_boot_locks() {
-    for LOCK in "$FIREWALL_LOCK" "$POLICY_LOCK"; do
+    for LOCK in "$FIREWALL_LOCK" "$POLICY_LOCK" "$APP_WATCH_LOCK"; do
         [ -e "$LOCK" ] || continue
         rm -rf "$LOCK" 2>/dev/null || true
         log_warn "Lock" "Removed boot lock" "lock=$LOCK"
@@ -288,17 +289,44 @@ start_network_watch() {
 start_app_watch() {
     "$MODDIR/app-watch.sh" >/dev/null 2>&1 &
     APP_WATCH_PID=$!
+
+    for i in 1 2 3; do
+        [ -r "$APP_WATCH_LOCK/owner" ] && break
+        sleep 1
+    done
+
+    if [ ! -r "$APP_WATCH_LOCK/owner" ]; then
+        log_error "App Watcher" "Startup failed"             "owner missing pid=$APP_WATCH_PID"
+        return 1
+    fi
+
     log_info "App Watcher" "Started" "pid=$APP_WATCH_PID"
 }
 
 ensure_app_watch_running() {
-    if [ -d "$DATA_DIR/app-watch.lock" ]; then
-        return 0
+    APP_WATCH_OWNER="$APP_WATCH_LOCK/owner"
+
+    if [ -n "$APP_WATCH_PID" ] &&
+       [ -r "$APP_WATCH_OWNER" ]; then
+
+        read -r LOCK_PID LOCK_START < "$APP_WATCH_OWNER"
+
+        if [ "$LOCK_PID" = "$APP_WATCH_PID" ] &&
+           kill -0 "$LOCK_PID" 2>/dev/null; then
+
+            CURRENT_START="$(awk '{print $22}' /proc/$LOCK_PID/stat 2>/dev/null)"
+
+            if [ -n "$CURRENT_START" ] &&
+               [ "$LOCK_START" = "$CURRENT_START" ]; then
+                return 0
+            fi
+        fi
     fi
 
     log_warn "App Watcher" "Process unhealthy" \
-        "old_pid=$APP_WATCH_PID lock=$DATA_DIR/app-watch.lock"
+        "old_pid=$APP_WATCH_PID lock=$APP_WATCH_LOCK"
 
+    rm -rf "$APP_WATCH_LOCK" 2>/dev/null || true
     start_app_watch
 }
 

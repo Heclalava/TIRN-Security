@@ -2,6 +2,14 @@
 MODDIR="${0%/*}"
 DATA_DIR="/data/adb/tirnsecurity"
 HTTPD="/data/adb/magisk/busybox"
+
+if [ -x /system/bin/awk ]; then
+    AWK="/system/bin/awk"
+elif [ -x /system/xbin/awk ]; then
+    AWK="/system/xbin/awk"
+else
+    exit 1
+fi
 PORT=8765
 PIDFILE="$DATA_DIR/httpd.pid"
 LOGFILE="$DATA_DIR/httpd.log"
@@ -10,7 +18,7 @@ mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
 if "$HTTPD" netstat -lnt 2>/dev/null | /system/bin/grep -q "127.0.0.1:$PORT "; then
-    PID=$("$HTTPD" ps 2>/dev/null | /system/bin/grep "httpd -p 127.0.0.1:$PORT" | /system/bin/grep -v grep | /system/bin/awk "{print \$1}" | /system/bin/head -1)
+    PID=$("$HTTPD" ps 2>/dev/null | /system/bin/grep "httpd -p 127.0.0.1:$PORT" | /system/bin/grep -v grep | "$AWK" "{print \$1}" | /system/bin/head -1)
 
     if [ -n "$PID" ]; then
         echo "$PID" > "$PIDFILE"
@@ -31,7 +39,7 @@ cd "$MODDIR/webroot" || exit 1
 sleep 1
 
 if "$HTTPD" netstat -lnt 2>/dev/null | /system/bin/grep -q "127.0.0.1:$PORT "; then
-    PID=$("$HTTPD" ps 2>/dev/null | /system/bin/grep "httpd -p 127.0.0.1:$PORT" | /system/bin/grep -v grep | /system/bin/awk "{print \$1}" | /system/bin/head -1)
+    PID=$("$HTTPD" ps 2>/dev/null | /system/bin/grep "httpd -p 127.0.0.1:$PORT" | /system/bin/grep -v grep | "$AWK" "{print \$1}" | /system/bin/head -1)
     [ -n "$PID" ] && echo "$PID" > "$PIDFILE"
     chmod 600 "$PIDFILE"
     exit 0
