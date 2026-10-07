@@ -461,7 +461,7 @@ button{color:inherit}
   border-left:1px solid rgba(235,219,178,.08);
   cursor:pointer;
 }
-.cell input{position:absolute;opacity:0;pointer-events:none}
+.cell input{display:none}
 .dot{
   width:18px;
   overflow:hidden;

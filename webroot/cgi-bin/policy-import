@@ -187,7 +187,7 @@ function scan_apps_char(c){
     }
 }
 
-function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,current_uid,current_name,current_profile){
+function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,current_uid,current_name,current_profile,euid,enetwork,eaction,euser,epkg,ename,eprofile,ecurrent_uid,ecurrent_name,ecurrent_profile){
     uid=jval(o,"uid")
     network=jval(o,"network")
     action=jval(o,"action")
@@ -203,11 +203,19 @@ function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,c
     profile=jval(o,"profile")
     sys=jbool(o,"system")
 
+    euid=json_escape(uid)
+    enetwork=json_escape(network)
+    eaction=json_escape(action)
+    euser=json_escape(user)
+    epkg=json_escape(pkg)
+    ename=json_escape(name)
+    eprofile=json_escape(profile)
+
     if(network!="LAN" && network!="MOBILE" && network!="WIFI"){
         stale++
         stale_count++
         stale_json=stale_json (stale_json?",":"") \
-            "{\"reason\":\"INVALID_NETWORK\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\",\"app\":{\"name\":\"" json_escape(name) "\",\"pkg\":\"" json_escape(pkg) "\",\"user\":\"" json_escape(user) "\",\"profile\":\"" json_escape(profile) "\",\"system\":" sys "}}"
+            "{\"reason\":\"INVALID_NETWORK\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
         return
     }
 
@@ -215,7 +223,7 @@ function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,c
         stale++
         stale_count++
         stale_json=stale_json (stale_json?",":"") \
-            "{\"reason\":\"INVALID_ACTION\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\",\"app\":{\"name\":\"" json_escape(name) "\",\"pkg\":\"" json_escape(pkg) "\",\"user\":\"" json_escape(user) "\",\"profile\":\"" json_escape(profile) "\",\"system\":" sys "}}"
+            "{\"reason\":\"INVALID_ACTION\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
         return
     }
 
@@ -228,22 +236,28 @@ function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,c
         stale++
         stale_count++
         stale_json=stale_json (stale_json?",":"") \
-            "{\"reason\":\"APP_MISSING\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\",\"app\":{\"name\":\"" json_escape(name) "\",\"pkg\":\"" json_escape(pkg) "\",\"user\":\"" json_escape(user) "\",\"profile\":\"" json_escape(profile) "\",\"system\":" sys "}}"
+            "{\"reason\":\"APP_MISSING\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
         return
     }
 
     if(current_uid!=uid){
+        ecurrent_uid=json_escape(current_uid)
+        ecurrent_name=json_escape(current_name)
+        ecurrent_profile=json_escape(current_profile)
+
         stale++
         stale_count++
         uid_mismatch++
         stale_json=stale_json (stale_json?",":"") \
-            "{\"reason\":\"UID_CHANGED\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\",\"app\":{\"name\":\"" json_escape(name) "\",\"pkg\":\"" json_escape(pkg) "\",\"user\":\"" json_escape(user) "\",\"profile\":\"" json_escape(profile) "\",\"system\":" sys "},\"current\":{\"uid\":\"" json_escape(current_uid) "\",\"name\":\"" json_escape(current_name) "\",\"profile\":\"" json_escape(current_profile) "\"}}"
+            "{\"reason\":\"UID_CHANGED\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "},\"current\":{\"uid\":\"" ecurrent_uid "\",\"name\":\"" ecurrent_name "\",\"profile\":\"" ecurrent_profile "\"}}"
         return
     }
 
     valid++
-    rules_json=rules_json (rules_json?",":"") \
-        "{\"user\":\"" json_escape(user) "\",\"pkg\":\"" json_escape(pkg) "\",\"uid\":\"" json_escape(uid) "\",\"network\":\"" json_escape(network) "\",\"action\":\"" json_escape(action) "\"}"
+
+    rule_prefix=(rules_json?",":"")
+    rule_item="{\"user\":\"" euser "\",\"pkg\":\"" epkg "\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\"}"
+    rules_json=rules_json rule_prefix rule_item
 }
 
 function scan_policy_char(c){
