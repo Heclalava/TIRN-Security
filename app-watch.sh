@@ -261,7 +261,7 @@ process_logcat_line() {
             EVENT_PACKAGE="${LINE#*dat=package:}"
             EVENT_PACKAGE="${EVENT_PACKAGE%% *}"
             debug_log "App Watcher" "Legacy ADDED parser matched" \
-                "package=$EVENT_PACKAGE"
+                "package=${EVENT_PACKAGE:-unresolved}"
             EVENT_ACTION="ADDED"
             ;;
 
