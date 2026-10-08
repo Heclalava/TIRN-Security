@@ -54,6 +54,33 @@ and firewall handling to operate correctly.
 
 TIRN Security is developed and tested on a rooted Google Pixel 8a.
 
+## Compatibility
+
+TIRN Security includes compatibility handling for both modern and legacy
+Android environments.
+
+Runtime helper binaries are provided for:
+
+- **ARM64 (AArch64)**
+- **ARMv7 (32-bit ARM / EABI5)**
+
+Legacy Android compatibility handling is included for devices using older
+Android userspace tools and command behaviour that differ from modern
+Android environments.
+
+Legacy compatibility has been specifically tested on:
+
+- Mecool M8S
+- Android 9
+- Magisk 23.0
+
+The primary development and modern Android validation environment is a
+rooted Google Pixel 8a.
+
+The tested environments are intended to document the platforms used for
+validation. Other Android versions, devices, Magisk releases, and
+userspace configurations may require additional testing.
+
 ## Installation
 
 Install TIRN Security as a Magisk module using the standard Magisk
@@ -361,7 +388,7 @@ wrong state, first refresh the WebUI and verify the current policy.
 
 ## Alpha Testing and Feedback
 
-TIRN Security 1.0.1 is an alpha release intended for testing and feedback.
+TIRN Security 1.0.2 is an alpha release intended for testing and feedback.
 
 Please report bugs and technical issues through the project's **GitHub
 Issues**.
@@ -373,6 +400,7 @@ possible:
 - Android version
 - Device model
 - Magisk version
+- CPU architecture
 - Steps to reproduce the problem
 - Expected behaviour
 - Actual behaviour

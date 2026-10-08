@@ -3,6 +3,15 @@
 MODDIR="/data/adb/modules/tirnsecurity"
 DATA_DIR="/data/adb/tirnsecurity"
 APP_AUDIT="$MODDIR/appaudit"
+
+if [ -x /system/bin/awk ]; then
+    AWK="/system/bin/awk"
+elif [ -x /system/xbin/awk ]; then
+    AWK="/system/xbin/awk"
+else
+    exit 1
+fi
+
 WORK="$DATA_DIR/log-export.$$"
 REPORT="$WORK/TIRN-security-report"
 ARCHIVE="$WORK/TIRN-security-report.zip"
@@ -42,7 +51,7 @@ DEVICE="$(/system/bin/getprop ro.product.model 2>/dev/null)"
 ANDROID="$(/system/bin/getprop ro.build.version.release 2>/dev/null)"
 MODULE_VERSION=""
 if [ -f "$MODDIR/module.prop" ]; then
-    MODULE_VERSION="$(/system/bin/awk -F= '$1 == "version" {print substr($0,index($0,"=")+1); exit}' "$MODDIR/module.prop" 2>/dev/null)"
+    MODULE_VERSION="$("$AWK" -F= '$1 == "version" {print substr($0,index($0,"=")+1); exit}' "$MODDIR/module.prop" 2>/dev/null)"
 fi
 
 {

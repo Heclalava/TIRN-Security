@@ -3,10 +3,18 @@
 MODDIR="${0%/*}"
 DATA_DIR="/data/adb/tirnsecurity"
 PM="/system/bin/pm"
-AWK="/system/bin/awk"
+if [ -x /system/bin/awk ]; then
+    AWK="/system/bin/awk"
+elif [ -x /system/xbin/awk ]; then
+    AWK="/system/xbin/awk"
+else
+    printf 'STATUS|AWK_NOT_FOUND\n'
+    exit 1
+fi
 SED="/system/bin/sed"
 SORT="/system/bin/sort"
 HEAD="/system/bin/head"
+DUMPSYS="/system/bin/dumpsys"
 
 USER="$1"
 PACKAGE="$2"
@@ -28,16 +36,73 @@ esac
 SYSTEMS="$DATA_DIR/refresh-app-single.systems.$$"
 trap 'rm -f "$SYSTEMS"' EXIT HUP INT TERM
 
-# Query only the requested package, then exact-match the package field.
-# pm may return prefix matches for a package argument.
-UIDS="$("$PM" list packages --user "$USER" -U "$PACKAGE" 2>/dev/null |
-    "$AWK" -v p="$PACKAGE" '
-        $1 == ("package:" p) && $2 ~ /^uid:[0-9]+$/ {
-            sub(/^uid:/, "", $2)
-            print $2
-        }
-    ' |
-    "$SORT" -u)"
+# Resolve the package UID using the native -U path when available.
+# Older Android pm implementations may not support -U; fall back to
+# dumpsys package packages, where userId is the package appId.
+PM_UID_SAMPLE="$("$PM" list packages -U 2>/dev/null | "$HEAD" -n 1)"
+
+case "$PM_UID_SAMPLE" in
+    package:*' uid:'*)
+        PM_HAS_UIDS=1
+        ;;
+    *)
+        PM_HAS_UIDS=0
+        ;;
+esac
+
+UIDS=""
+
+if [ "$PM_HAS_UIDS" -eq 1 ]; then
+    # Query only the requested package, then exact-match the package field.
+    UIDS="$("$PM" list packages --user "$USER" -U "$PACKAGE" 2>/dev/null |
+        "$AWK" -v p="$PACKAGE" '
+            $1 == ("package:" p) && $2 ~ /^uid:[0-9]+$/ {
+                sub(/^uid:/, "", $2)
+                print $2
+            }
+        ' |
+        "$SORT" -u)"
+else
+    # Legacy Android: verify that the package is installed for this user,
+    # then resolve its appId from dumpsys and derive the per-user UID.
+    if "$PM" list packages --user "$USER" "$PACKAGE" 2>/dev/null |
+        "$AWK" -v p="$PACKAGE" '
+            $1 == ("package:" p) {
+                found=1
+                exit
+            }
+            END {
+                exit(found ? 0 : 1)
+            }
+        '
+    then
+        APPID="$("$DUMPSYS" package packages 2>/dev/null |
+            "$AWK" -v p="$PACKAGE" '
+                /^  Package \[/ {
+                    pkg=$0
+                    sub(/^  Package \[/, "", pkg)
+                    sub(/\].*$/, "", pkg)
+                    next
+                }
+
+                /^    userId=[0-9][0-9]*$/ && pkg == p {
+                    id=$0
+                    sub(/^    userId=/, "", id)
+                    print id
+                    exit
+                }
+            ')"
+
+        case "$APPID" in
+            ''|*[!0-9]*)
+                ;;
+            *)
+                UID=$((USER * 100000 + APPID))
+                UIDS="$UID"
+                ;;
+        esac
+    fi
+fi
 
 UID="$(printf '%s\n' "$UIDS" | "$HEAD" -n 1)"
 UID2="$(printf '%s\n' "$UIDS" | "$SED" -n '2p')"
@@ -68,7 +133,7 @@ esac
 
 # Resolve the APK using the same package/APK lookup semantics as
 # refresh_apps, restricted to the requested package.
-APK="$("$PM" list packages -f -U 2>/dev/null |
+APK="$("$PM" list packages -f 2>/dev/null |
     "$SED" -n 's/^package:\(.*\.apk\)=\([^ ]*\).*/\2|\1/p' |
     "$AWK" -F'|' -v p="$PACKAGE" '$1 == p { print $2; exit }')"
 

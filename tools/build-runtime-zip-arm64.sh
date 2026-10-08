@@ -4,9 +4,9 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 
-PKG="TIRN-Security-$(git describe --tags --always)-runtime-install.zip"
+PKG="TIRN-Security-$(git describe --tags --always)-arm64-runtime-install.zip"
 
-echo "=== BUILD RUNTIME HELPERS ==="
+echo "=== BUILD ARM64 RUNTIME HELPERS ==="
 
 (
     cd tools/apklabel
@@ -23,7 +23,7 @@ echo "=== BUILD RUNTIME HELPERS ==="
     GO111MODULE=off GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o apphelper-arm64 .
 )
 
-echo "=== VERIFY TRACKED RUNTIME HELPERS ==="
+echo "=== VERIFY ARM64 RUNTIME HELPERS ==="
 
 for pair in \
     "apklabel tools/apklabel/apklabel-arm64" \

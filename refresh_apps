@@ -11,6 +11,7 @@ LABELS="$DATA_DIR/labels.conf"
 APK_LABEL="/data/adb/modules/tirnsecurity/apklabel"
 APK_LABELS="$DATA_DIR/apklabels.$$"
 APK_PATHS="$DATA_DIR/apkpaths.$$"
+PACKAGE_UIDS="$DATA_DIR/package-uids.$$"
 APK_LABEL_CACHE="$DATA_DIR/apk-label-cache.$$"
 APK_LABEL_STORE="$DATA_DIR/apk-label-store"
 APK_LABEL_STORE_TMP="$APK_LABEL_STORE.$$"
@@ -46,12 +47,20 @@ mkdir -p "$DATA_DIR" || exit 1
 TIRN_LOCALE="$(/system/bin/getprop persist.sys.locale 2>/dev/null)"
 export TIRN_LOCALE
 
+if [ -x /system/bin/awk ]; then
+    AWK="/system/bin/awk"
+elif [ -x /system/xbin/awk ]; then
+    AWK="/system/xbin/awk"
+else
+    exit 1
+fi
+
 get_proc_start() {
     PID="$1"
     STAT="/proc/$PID/stat"
     [ -r "$STAT" ] || return 1
     /system/bin/sed 's/.*) //' "$STAT" 2>/dev/null |
-        /system/bin/awk '{print $20}'
+        "$AWK" '{print $20}'
 }
 
 LOCK_OWNER="$LOCK/owner"
@@ -126,7 +135,7 @@ if ! acquire_apps_lock; then
     exit 2
 fi
 
-trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; if [ "$TIRN_REFRESH_SOURCE" = "UI" ]; then REFRESH_DURATION=$(( $(date +%s) - REFRESH_START )); if [ "$STATUS" -eq 0 ]; then log_info "Apps" "Cache manually refreshed" "UI refresh duration=${REFRESH_DURATION}s"; else log_error "Apps" "Cache refresh failed" "UI refresh duration=${REFRESH_DURATION}s status=ERROR"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$APK_LABEL_CACHE" "$APK_LABEL_META" "$APK_LABEL_RESULTS" "$APK_LABEL_RESOLVED" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$IDENTITY_TMP" "$IDENTITY_RAW" "$PROGRESS_TMP" "$APK_LABEL_STORE_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'STATUS=$?; if [ "$PROGRESS_ACTIVE" -eq 1 ]; then if [ "$STATUS" -eq 0 ]; then write_progress "COMPLETE" "$PROGRESS_TOTAL" "$PROGRESS_TOTAL"; else write_progress "ERROR" "$PROGRESS_PROCESSED" "$PROGRESS_TOTAL"; fi; fi; if [ "$TIRN_REFRESH_SOURCE" = "UI" ]; then REFRESH_DURATION=$(( $(date +%s) - REFRESH_START )); if [ "$STATUS" -eq 0 ]; then log_info "Apps" "Cache manually refreshed" "UI refresh duration=${REFRESH_DURATION}s"; else log_error "Apps" "Cache refresh failed" "UI refresh duration=${REFRESH_DURATION}s status=ERROR"; fi; fi; rm -f "$TMP" "$USERS" "$APK_LABELS" "$APK_PATHS" "$PACKAGE_UIDS" "$APK_LABEL_CACHE" "$APK_LABEL_META" "$APK_LABEL_RESULTS" "$APK_LABEL_RESOLVED" "$APK_UNIQUE" "$ELIGIBLE_PKGS" "$IDENTITY_TMP" "$IDENTITY_RAW" "$PROGRESS_TMP" "$APK_LABEL_STORE_TMP" "$DATA_DIR"/systems.* "$DATA_DIR"/packages.* "$DATA_DIR"/apps.[0-9]* "$LOCK_OWNER"; rmdir "$LOCK" 2>/dev/null' EXIT
 
 
 "$PM" list users 2>/dev/null |
@@ -153,7 +162,38 @@ first=1
 
 : > "$APK_LABELS"
 
-"$PM" list packages -f -U 2>/dev/null |
+PM_UID_SAMPLE="$("$PM" list packages -U 2>/dev/null | /system/bin/head -n 1)"
+case "$PM_UID_SAMPLE" in
+    package:*' uid:'*)
+        PM_HAS_UIDS=1
+        ;;
+    *)
+        PM_HAS_UIDS=0
+        ;;
+esac
+
+if [ "$PM_HAS_UIDS" -eq 0 ]; then
+    /system/bin/dumpsys package packages 2>/dev/null |
+    "$AWK" '
+        /^  Package \[/ {
+            pkg=$0
+            sub(/^  Package \[/, "", pkg)
+            sub(/\].*$/, "", pkg)
+            next
+        }
+
+        /^    userId=[0-9][0-9]*$/ {
+            appid=$0
+            sub(/^    userId=/, "", appid)
+
+            if (pkg != "" && appid != "")
+                print pkg "|" appid
+        }
+    ' |
+    /system/bin/sort -t'|' -k1,1 -u > "$PACKAGE_UIDS" || exit 1
+fi
+
+"$PM" list packages -f 2>/dev/null |
 /system/bin/sed -n 's/^package:\(.*\.apk\)=\([^ ]*\).*/\2|\1/p' > "$APK_PATHS"
 
 for user in $(/system/bin/cut -d'|' -f1 "$USERS")
@@ -167,9 +207,34 @@ do
     "$PM" list packages -s --user "$user" 2>/dev/null |
     /system/bin/sed 's/^package://' > "$SYSTEMS"
 
-    "$PM" list packages --user "$user" -U 2>/dev/null |
-    /system/bin/sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\)$/\1|\2/p' |
-    /system/bin/sed "s/$/|$user/" > "$PKGS"
+    if [ "$PM_HAS_UIDS" -eq 1 ]; then
+        "$PM" list packages --user "$user" -U 2>/dev/null |
+        /system/bin/sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\)$/\1|\2/p' |
+        /system/bin/sed "s/$/|$user/" > "$PKGS"
+    else
+        "$PM" list packages --user "$user" 2>/dev/null |
+        /system/bin/sed 's/^package://' |
+        "$AWK" -v user="$user" -F'|' -v uidfile="$PACKAGE_UIDS" '
+            BEGIN {
+                while ((getline line < uidfile) > 0) {
+                    split(line, a, "|")
+                    if (a[1] != "" && a[2] != "")
+                        appid[a[1]] = a[2]
+                }
+                close(uidfile)
+            }
+
+            {
+                pkg=$1
+
+                if (pkg == "" || !(pkg in appid))
+                    next
+
+                uid=(user * 100000) + appid[pkg]
+                printf "%s|%s|%s\n", pkg, uid, user
+            }
+        ' > "$PKGS"
+    fi
 done
 
 # Build eligible package records and the unique APK set.
@@ -184,7 +249,7 @@ do
 
     PKGS="$DATA_DIR/packages.$user"
 
-    /system/bin/awk -F'|' -v apkfile="$APK_PATHS" '
+    "$AWK" -F'|' -v apkfile="$APK_PATHS" '
         BEGIN {
             while ((getline line < apkfile) > 0) {
                 split(line, a, "|")
@@ -259,7 +324,7 @@ fi
 # Produce current APK records with either a cached result or PENDING.
 # Fields:
 # path | inode | size | mtime | status | label
-/system/bin/awk -F '\t' \
+"$AWK" -F '\t' \
     -v valid="$CACHE_VALID" \
     -v cache="$APK_LABEL_STORE" '
     BEGIN {
@@ -318,7 +383,7 @@ done < "$APK_LABEL_RESULTS"
 
 PROGRESS_PROCESSED=0
 
-/system/bin/awk -F'\t' '
+"$AWK" -F'\t' '
 BEGIN {
     while ((getline line < "'"$APK_LABEL_RESOLVED"'") > 0) {
         split(line, r, "\t")
@@ -373,7 +438,7 @@ rm -f "$APK_LABEL_RESOLVED"
 mv -f "$APK_LABEL_STORE_TMP" "$APK_LABEL_STORE" || exit 1
 
 
-/system/bin/awk -F'|' '
+"$AWK" -F'|' '
     NR == FNR {
         apk_path[$1] = $2
         next
@@ -404,7 +469,7 @@ do
     PKGS="$DATA_DIR/packages.$user"
     OUT="$DATA_DIR/apps.$user"
 
-    /system/bin/awk -F'|' '
+    "$AWK" -F'|' '
         BEGIN {
             while ((getline line < ARGV[3]) > 0) {
                 split(line, a, "=")
@@ -500,7 +565,7 @@ done
 
 printf ']}\n' >> "$TMP"
 
-/system/bin/awk -F'|' '
+"$AWK" -F'|' '
     NF != 3 ||
     $1 == "" || $2 == "" || $3 == "" ||
     $1 !~ /^[0-9]+$/ ||

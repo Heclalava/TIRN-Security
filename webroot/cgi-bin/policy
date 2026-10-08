@@ -58,7 +58,7 @@ if [ "$REQUEST_METHOD" = "GET" ]; then
                 return t
             }
 
-            FILENAME == "/dev/stdin" {
+            FILENAME == "-" {
                 if (match($0, /"user":"[^"]+"/))
                     user=substr($0,RSTART+8,RLENGTH-9)
                 else
@@ -107,7 +107,7 @@ if [ "$REQUEST_METHOD" = "GET" ]; then
                     first=0
                 }
             }
-        ' /dev/stdin "$POLICY"
+        ' - "$POLICY"
     fi
 
     printf ']}\n'

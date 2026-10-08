@@ -10,6 +10,8 @@ POLICY_STATE_FILE="$DATA_DIR/policy.applied"
 
 IPTABLES="/system/bin/iptables"
 IP6TABLES="/system/bin/ip6tables"
+IPTABLES_WAIT="-w 5"
+IP6TABLES_WAIT="-w 5"
 IP="/system/bin/ip"
 
 MAIN_CHAIN="TIRNFW"
@@ -41,8 +43,33 @@ fi
 . "$MODDIR/logging-common.sh"
 AUDIT_LOG="$LOG_FILE"
 
+detect_iptables_wait_mode() {
+    if "$IPTABLES" $IPTABLES_WAIT -S OUTPUT >/dev/null 2>&1; then
+        IPTABLES_WAIT="-w 5"
+    elif "$IPTABLES" -w -S OUTPUT >/dev/null 2>&1; then
+        IPTABLES_WAIT="-w"
+    else
+        log_error "Firewall" "iptables compatibility detection failed" \
+            "IPv4 wait option unavailable"
+        return 1
+    fi
+
+    if "$IP6TABLES" $IP6TABLES_WAIT -S OUTPUT >/dev/null 2>&1; then
+        IP6TABLES_WAIT="-w 5"
+    elif "$IP6TABLES" -w -S OUTPUT >/dev/null 2>&1; then
+        IP6TABLES_WAIT="-w"
+    else
+        log_error "Firewall" "iptables compatibility detection failed" \
+            "IPv6 wait option unavailable"
+        return 1
+    fi
+
+    return 0
+}
+
 # Atomic firewall transaction lock. This is separate from policy.lock.
 FIREWALL_LOCK="$DATA_DIR/firewall.lock"
+APP_WATCH_LOCK="$DATA_DIR/app-watch.lock"
 FIREWALL_LOCK_OWNER="$FIREWALL_LOCK/owner"
 
 acquire_firewall_lock() {
@@ -104,7 +131,8 @@ acquire_policy_lock() {
         POLICY_LOCK_WAIT=$((POLICY_LOCK_WAIT + 1))
 
         if [ "$POLICY_LOCK_WAIT" -ge 200 ]; then
-            log_error "Policy" "Lock timeout"                 "another policy transaction is active"
+            log_error "Policy" "Lock timeout" \
+                "another policy transaction is active"
             return 1
         fi
     done
@@ -117,7 +145,7 @@ release_policy_lock() {
 }
 
 clear_stale_boot_locks() {
-    for LOCK in "$FIREWALL_LOCK" "$POLICY_LOCK"; do
+    for LOCK in "$FIREWALL_LOCK" "$POLICY_LOCK" "$APP_WATCH_LOCK"; do
         [ -e "$LOCK" ] || continue
         rm -rf "$LOCK" 2>/dev/null || true
         log_warn "Lock" "Removed boot lock" "lock=$LOCK"
@@ -223,7 +251,8 @@ start_network_watch() {
     rm -f "$NETWORK_WATCH_FIFO" 2>/dev/null || true
 
     if ! mkfifo "$NETWORK_WATCH_FIFO" 2>/dev/null; then
-        log_error "Network Watcher" "FIFO creation failed"             "file=$NETWORK_WATCH_FIFO"
+        log_error "Network Watcher" "FIFO creation failed" \
+            "file=$NETWORK_WATCH_FIFO"
         return 1
     fi
 
@@ -260,24 +289,56 @@ start_network_watch() {
 start_app_watch() {
     "$MODDIR/app-watch.sh" >/dev/null 2>&1 &
     APP_WATCH_PID=$!
+
+    for i in 1 2 3; do
+        [ -r "$APP_WATCH_LOCK/owner" ] && break
+        sleep 1
+    done
+
+    if [ ! -r "$APP_WATCH_LOCK/owner" ]; then
+        log_error "App Watcher" "Startup failed"             "owner missing pid=$APP_WATCH_PID"
+        return 1
+    fi
+
     log_info "App Watcher" "Started" "pid=$APP_WATCH_PID"
 }
 
 ensure_app_watch_running() {
-    if [ -d "$DATA_DIR/app-watch.lock" ]; then
-        return 0
+    APP_WATCH_OWNER="$APP_WATCH_LOCK/owner"
+
+    if [ -n "$APP_WATCH_PID" ] &&
+       [ -r "$APP_WATCH_OWNER" ]; then
+
+        read -r LOCK_PID LOCK_START < "$APP_WATCH_OWNER"
+
+        if [ "$LOCK_PID" = "$APP_WATCH_PID" ] &&
+           kill -0 "$LOCK_PID" 2>/dev/null; then
+
+            CURRENT_START="$(awk '{print $22}' /proc/$LOCK_PID/stat 2>/dev/null)"
+
+            if [ -n "$CURRENT_START" ] &&
+               [ "$LOCK_START" = "$CURRENT_START" ]; then
+                return 0
+            fi
+        fi
     fi
 
     log_warn "App Watcher" "Process unhealthy" \
-        "old_pid=$APP_WATCH_PID lock=$DATA_DIR/app-watch.lock"
+        "old_pid=$APP_WATCH_PID lock=$APP_WATCH_LOCK"
 
+    rm -rf "$APP_WATCH_LOCK" 2>/dev/null || true
     start_app_watch
 }
 
 GENERATION_GUARD_CHAIN="TIRNFW-GUARD"
 
 generation_chain_exists() {
-    "$1" -w 5 -S "$2" >/dev/null 2>&1
+    if [ "$1" = "$IPTABLES" ]; then
+        IPT_WAIT="$IPTABLES_WAIT"
+    else
+        IPT_WAIT="$IP6TABLES_WAIT"
+    fi
+    "$1" $IPT_WAIT -S "$2" >/dev/null 2>&1
 }
 
 
@@ -338,8 +399,14 @@ network_generation_create_family() {
     FAMILY="$2"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -347,7 +414,7 @@ network_generation_create_family() {
 
     network_dispatcher_chain_exists "$IPT" "$DISP" && return 1
 
-    "$IPT" -w 5 -N "$DISP" || return 1
+    "$IPT" $IPT_WAIT -N "$DISP" || return 1
 
     return 0
 }
@@ -357,8 +424,14 @@ network_generation_delete_family() {
     FAMILY="$2"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -368,8 +441,8 @@ network_generation_delete_family() {
         return 0
     fi
 
-    "$IPT" -w 5 -F "$DISP" || return 1
-    "$IPT" -w 5 -X "$DISP" || return 1
+    "$IPT" $IPT_WAIT -F "$DISP" || return 1
+    "$IPT" $IPT_WAIT -X "$DISP" || return 1
 
     return 0
 }
@@ -399,8 +472,14 @@ network_generation_populate_family() {
     NETWORK_STATE="$3"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -416,59 +495,53 @@ network_generation_populate_family() {
     policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
     policy_pointer_chain_exists "$IPT" "$LAN" || return 1
 
-    while IFS='|' read -r TYPE VALUE EXTRA; do
+    while IFS='|' read -r TYPE VALUE IFACE; do
         case "$TYPE" in
             MOBILE)
                 [ -n "$VALUE" ] || continue
-
-                "$IPT" -w 5 -A "$DISP" \
-                    -o "$VALUE" -j "$MOB" || return 1
-
-                "$IPT" -w 5 -A "$DISP" \
-                    -o "$VALUE" -j ACCEPT || return 1
+                "$IPT" $IPT_WAIT -A "$DISP" -o "$VALUE" -j "$MOB" ||
+                    return 1
+                "$IPT" $IPT_WAIT -A "$DISP" -o "$VALUE" -j ACCEPT ||
+                    return 1
                 ;;
 
-            WLAN4)
+            WLAN4|NET4)
                 [ "$FAMILY" = "ipv4" ] || continue
                 [ -n "$VALUE" ] || continue
+                [ -n "$IFACE" ] || continue
 
-                "$IPT" -w 5 -A "$DISP" \
-                    -d "$VALUE" -o wlan0 -j "$LAN" || return 1
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -d "$VALUE" -o "$IFACE" -j "$LAN" || return 1
 
-                "$IPT" -w 5 -A "$DISP" \
-                    -d "$VALUE" -o wlan0 -j ACCEPT || return 1
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -d "$VALUE" -o "$IFACE" -j ACCEPT || return 1
+
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -o "$IFACE" -j "$WIFI" || return 1
+
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -o "$IFACE" -j ACCEPT || return 1
                 ;;
 
-            WLAN6)
+            WLAN6|NET6)
                 [ "$FAMILY" = "ipv6" ] || continue
                 [ -n "$VALUE" ] || continue
+                [ -n "$IFACE" ] || continue
 
-                "$IPT" -w 5 -A "$DISP" \
-                    -d "$VALUE" -o wlan0 -j "$LAN" || return 1
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -d "$VALUE" -o "$IFACE" -j "$LAN" || return 1
 
-                "$IPT" -w 5 -A "$DISP" \
-                    -d "$VALUE" -o wlan0 -j ACCEPT || return 1
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -d "$VALUE" -o "$IFACE" -j ACCEPT || return 1
+
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -o "$IFACE" -j "$WIFI" || return 1
+
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -o "$IFACE" -j ACCEPT || return 1
                 ;;
         esac
     done < "$NETWORK_STATE"
-
-    if [ "$FAMILY" = "ipv4" ]; then
-        if grep -q '^WLAN4|' "$NETWORK_STATE"; then
-            "$IPT" -w 5 -A "$DISP" \
-                -o wlan0 -j "$WIFI" || return 1
-
-            "$IPT" -w 5 -A "$DISP" \
-                -o wlan0 -j ACCEPT || return 1
-        fi
-    else
-        if grep -q '^WLAN6|' "$NETWORK_STATE"; then
-            "$IPT" -w 5 -A "$DISP" \
-                -o wlan0 -j "$WIFI" || return 1
-
-            "$IPT" -w 5 -A "$DISP" \
-                -o wlan0 -j ACCEPT || return 1
-        fi
-    fi
 
     while IFS='|' read -r TYPE VPN_IFACE UNDERLYING_IFACE; do
         [ "$TYPE" = "VPN" ] || continue
@@ -476,73 +549,60 @@ network_generation_populate_family() {
         [ -n "$UNDERLYING_IFACE" ] || continue
 
         case "$UNDERLYING_IFACE" in
-            wlan*)
-                if [ "$FAMILY" = "ipv4" ]; then
-                    if ! grep -q '^WLAN4|' "$NETWORK_STATE"; then
-                        log_error "Firewall" "Unsupported VPN topology" \
-                            "family=ipv4 vpn=$VPN_IFACE underlying=$UNDERLYING_IFACE missing=WLAN4"
-                        return 1
-                    fi
-
-                    while IFS='|' read -r WLAN_TYPE WLAN_VALUE EXTRA; do
-                        [ "$WLAN_TYPE" = "WLAN4" ] || continue
-                        [ -n "$WLAN_VALUE" ] || continue
-
-                        "$IPT" -w 5 -A "$DISP" \
-                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j "$LAN" || return 1
-
-                        "$IPT" -w 5 -A "$DISP" \
-                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j ACCEPT || return 1
-                    done < "$NETWORK_STATE"
-
-                    "$IPT" -w 5 -A "$DISP" \
-                        -o "$VPN_IFACE" -j "$WIFI" || return 1
-
-                    "$IPT" -w 5 -A "$DISP" \
-                        -o "$VPN_IFACE" -j ACCEPT || return 1
-                else
-                    if ! grep -q '^WLAN6|' "$NETWORK_STATE"; then
-                        log_error "Firewall" "Unsupported VPN topology" \
-                            "family=ipv6 vpn=$VPN_IFACE underlying=$UNDERLYING_IFACE missing=WLAN6"
-                        return 1
-                    fi
-
-                    while IFS='|' read -r WLAN_TYPE WLAN_VALUE EXTRA; do
-                        [ "$WLAN_TYPE" = "WLAN6" ] || continue
-                        [ -n "$WLAN_VALUE" ] || continue
-
-                        "$IPT" -w 5 -A "$DISP" \
-                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j "$LAN" || return 1
-
-                        "$IPT" -w 5 -A "$DISP" \
-                            -o "$VPN_IFACE" -d "$WLAN_VALUE" -j ACCEPT || return 1
-                    done < "$NETWORK_STATE"
-
-                    "$IPT" -w 5 -A "$DISP" \
-                        -o "$VPN_IFACE" -j "$WIFI" || return 1
-
-                    "$IPT" -w 5 -A "$DISP" \
-                        -o "$VPN_IFACE" -j ACCEPT || return 1
-                fi
-                ;;
-
             rmnet*)
-                "$IPT" -w 5 -A "$DISP" \
+                "$IPT" $IPT_WAIT -A "$DISP" \
                     -o "$VPN_IFACE" -j "$MOB" || return 1
 
-                "$IPT" -w 5 -A "$DISP" \
+                "$IPT" $IPT_WAIT -A "$DISP" \
                     -o "$VPN_IFACE" -j ACCEPT || return 1
                 ;;
 
             *)
-                log_error "Firewall" "Unsupported VPN topology" \
-                    "family=$FAMILY vpn=$VPN_IFACE underlying=$UNDERLYING_IFACE"
-                return 1
+                if [ "$FAMILY" = "ipv4" ]; then
+                    MATCH_TYPE="WLAN4"
+                    ALT_TYPE="NET4"
+                else
+                    MATCH_TYPE="WLAN6"
+                    ALT_TYPE="NET6"
+                fi
+
+                MATCH_FOUND=0
+
+                while IFS='|' read -r NET_TYPE NET_VALUE NET_IFACE; do
+                    case "$NET_TYPE" in
+                        "$MATCH_TYPE"|"$ALT_TYPE")
+                            [ "$NET_IFACE" = "$UNDERLYING_IFACE" ] || continue
+                            [ -n "$NET_VALUE" ] || continue
+
+                            MATCH_FOUND=1
+
+                            "$IPT" $IPT_WAIT -A "$DISP" \
+                                -o "$VPN_IFACE" -d "$NET_VALUE" -j "$LAN" ||
+                                return 1
+
+                            "$IPT" $IPT_WAIT -A "$DISP" \
+                                -o "$VPN_IFACE" -d "$NET_VALUE" -j ACCEPT ||
+                                return 1
+                            ;;
+                    esac
+                done < "$NETWORK_STATE"
+
+                if [ "$MATCH_FOUND" -eq 0 ]; then
+                    log_error "Firewall" "Unsupported VPN topology" \
+                        "family=$FAMILY vpn=$VPN_IFACE underlying=$UNDERLYING_IFACE missing=$MATCH_TYPE/$ALT_TYPE"
+                    return 1
+                fi
+
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -o "$VPN_IFACE" -j "$WIFI" || return 1
+
+                "$IPT" $IPT_WAIT -A "$DISP" \
+                    -o "$VPN_IFACE" -j ACCEPT || return 1
                 ;;
         esac
     done < "$NETWORK_STATE"
 
-    "$IPT" -w 5 -A "$DISP" -j RETURN || return 1
+    "$IPT" $IPT_WAIT -A "$DISP" -j RETURN || return 1
 
     return 0
 }
@@ -552,8 +612,14 @@ network_generation_verify_family() {
     FAMILY="$2"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -567,7 +633,7 @@ network_generation_verify_family() {
     policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
     policy_pointer_chain_exists "$IPT" "$LAN" || return 1
 
-    RULES="$("$IPT" -w 5 -S "$DISP" 2>/dev/null)" || return 1
+    RULES="$("$IPT" $IPT_WAIT -S "$DISP" 2>/dev/null)" || return 1
 
     RETURN_COUNT=0
     LAST_RULE=""
@@ -643,8 +709,14 @@ policy_pointer_family_exists() {
     FAMILY="$1"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -659,8 +731,14 @@ policy_pointer_create_family() {
     FAMILY="$1"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -674,16 +752,16 @@ policy_pointer_create_family() {
         return 1
     fi
 
-    "$IPT" -w 5 -N "$MOB" || return 1
+    "$IPT" $IPT_WAIT -N "$MOB" || return 1
 
-    if ! "$IPT" -w 5 -N "$WIFI"; then
-        "$IPT" -w 5 -X "$MOB" >/dev/null 2>&1 || true
+    if ! "$IPT" $IPT_WAIT -N "$WIFI"; then
+        "$IPT" $IPT_WAIT -X "$MOB" >/dev/null 2>&1 || true
         return 1
     fi
 
-    if ! "$IPT" -w 5 -N "$LAN"; then
-        "$IPT" -w 5 -X "$WIFI" >/dev/null 2>&1 || true
-        "$IPT" -w 5 -X "$MOB" >/dev/null 2>&1 || true
+    if ! "$IPT" $IPT_WAIT -N "$LAN"; then
+        "$IPT" $IPT_WAIT -X "$WIFI" >/dev/null 2>&1 || true
+        "$IPT" $IPT_WAIT -X "$MOB" >/dev/null 2>&1 || true
         return 1
     fi
 
@@ -694,8 +772,14 @@ policy_pointer_delete_family() {
     FAMILY="$1"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -705,8 +789,8 @@ policy_pointer_delete_family() {
 
     for CHAIN in "$MOB" "$WIFI" "$LAN"; do
         if policy_pointer_chain_exists "$IPT" "$CHAIN"; then
-            "$IPT" -w 5 -F "$CHAIN" || return 1
-            "$IPT" -w 5 -X "$CHAIN" || return 1
+            "$IPT" $IPT_WAIT -F "$CHAIN" || return 1
+            "$IPT" $IPT_WAIT -X "$CHAIN" || return 1
         fi
     done
 
@@ -717,8 +801,14 @@ policy_pointer_verify_family() {
     FAMILY="$1"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -734,7 +824,7 @@ policy_pointer_verify_family() {
             *) return 1 ;;
         esac
 
-        RULES="$("$IPT" -w 5 -S "$CHAIN" 2>/dev/null)" || return 1
+        RULES="$("$IPT" $IPT_WAIT -S "$CHAIN" 2>/dev/null)" || return 1
 
         TARGET=""
         RETURN_COUNT=0
@@ -803,29 +893,29 @@ EOF
 
 generation_guard_create() {
     if generation_chain_exists "$IPTABLES" "$GENERATION_GUARD_CHAIN"; then
-        "$IPTABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" || return 1
+        "$IPTABLES" $IPTABLES_WAIT -F "$GENERATION_GUARD_CHAIN" || return 1
     else
-        "$IPTABLES" -w 5 -N "$GENERATION_GUARD_CHAIN" || return 1
+        "$IPTABLES" $IPTABLES_WAIT -N "$GENERATION_GUARD_CHAIN" || return 1
     fi
 
     if generation_chain_exists "$IP6TABLES" "$GENERATION_GUARD_CHAIN"; then
-        "$IP6TABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" || return 1
+        "$IP6TABLES" $IP6TABLES_WAIT -F "$GENERATION_GUARD_CHAIN" || return 1
     else
-        "$IP6TABLES" -w 5 -N "$GENERATION_GUARD_CHAIN" || {
-            "$IPTABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
+        "$IP6TABLES" $IP6TABLES_WAIT -N "$GENERATION_GUARD_CHAIN" || {
+            "$IPTABLES" $IPTABLES_WAIT -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
             return 1
         }
     fi
 
-    "$IPTABLES" -w 5 -A "$GENERATION_GUARD_CHAIN" -j DROP || {
-        "$IPTABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
-        "$IP6TABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
+    "$IPTABLES" $IPTABLES_WAIT -A "$GENERATION_GUARD_CHAIN" -j DROP || {
+        "$IPTABLES" $IPTABLES_WAIT -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
+        "$IP6TABLES" $IP6TABLES_WAIT -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
         return 1
     }
 
-    "$IP6TABLES" -w 5 -A "$GENERATION_GUARD_CHAIN" -j DROP || {
-        "$IPTABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
-        "$IP6TABLES" -w 5 -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
+    "$IP6TABLES" $IP6TABLES_WAIT -A "$GENERATION_GUARD_CHAIN" -j DROP || {
+        "$IPTABLES" $IPTABLES_WAIT -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
+        "$IP6TABLES" $IP6TABLES_WAIT -F "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || true
         return 1
     }
 
@@ -835,16 +925,16 @@ generation_guard_create() {
 generation_guard_install() {
     generation_guard_create || return 1
 
-    if ! "$IPTABLES" -w 5 -C "$MAIN_CHAIN" -j "$GENERATION_GUARD_CHAIN" 2>/dev/null; then
-        if ! "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$GENERATION_GUARD_CHAIN"; then
+    if ! "$IPTABLES" $IPTABLES_WAIT -C "$MAIN_CHAIN" -j "$GENERATION_GUARD_CHAIN" 2>/dev/null; then
+        if ! "$IPTABLES" $IPTABLES_WAIT -I "$MAIN_CHAIN" 1 -j "$GENERATION_GUARD_CHAIN"; then
             log_error "Firewall" "IPv4 guard installation failed" \
                 "guard state must be re-evaluated"
             return 1
         fi
     fi
 
-    if ! "$IP6TABLES" -w 5 -C "$MAIN_CHAIN" -j "$GENERATION_GUARD_CHAIN" 2>/dev/null; then
-        if ! "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" 1 -j "$GENERATION_GUARD_CHAIN"; then
+    if ! "$IP6TABLES" $IP6TABLES_WAIT -C "$MAIN_CHAIN" -j "$GENERATION_GUARD_CHAIN" 2>/dev/null; then
+        if ! "$IP6TABLES" $IP6TABLES_WAIT -I "$MAIN_CHAIN" 1 -j "$GENERATION_GUARD_CHAIN"; then
             log_error "Firewall" "IPv6 guard installation failed" \
                 "ipv4=active ipv6=missing; IPv4 guard retained"
             return 1
@@ -864,13 +954,15 @@ generation_guard_install() {
 }
 
 generation_guard_remove() {
-    IPV4_RULES="$("$IPTABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || {
-        log_error "Firewall" "IPv4 guard state read failed"             "guard state unknown"
+    IPV4_RULES="$("$IPTABLES" $IPTABLES_WAIT -S "$MAIN_CHAIN" 2>/dev/null)" || {
+        log_error "Firewall" "IPv4 guard state read failed" \
+            "guard state unknown"
         return 1
     }
 
-    IPV6_RULES="$("$IP6TABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || {
-        log_error "Firewall" "IPv6 guard state read failed"             "guard state unknown"
+    IPV6_RULES="$("$IP6TABLES" $IP6TABLES_WAIT -S "$MAIN_CHAIN" 2>/dev/null)" || {
+        log_error "Firewall" "IPv6 guard state read failed" \
+            "guard state unknown"
         return 1
     }
 
@@ -892,43 +984,57 @@ generation_guard_remove() {
         1:1)
             ;;
         *)
-            log_error "Firewall" "Guard state inconsistent"                 "ipv4_hooks=$IPV4_GUARD_COUNT ipv6_hooks=$IPV6_GUARD_COUNT"
+            log_error "Firewall" "Guard state inconsistent" \
+                "ipv4_hooks=$IPV4_GUARD_COUNT ipv6_hooks=$IPV6_GUARD_COUNT"
             return 1
             ;;
     esac
 
-    if ! "$IPTABLES" -w 5 -D "$MAIN_CHAIN"         -j "$GENERATION_GUARD_CHAIN"; then
-        log_error "Firewall" "IPv4 guard removal failed"             "guard state must be re-evaluated"
+    if ! "$IPTABLES" $IPTABLES_WAIT -D "$MAIN_CHAIN"         -j "$GENERATION_GUARD_CHAIN"; then
+        log_error "Firewall" "IPv4 guard removal failed" \
+            "guard state must be re-evaluated"
         return 1
     fi
 
-    if ! "$IP6TABLES" -w 5 -D "$MAIN_CHAIN"         -j "$GENERATION_GUARD_CHAIN"; then
+    if ! "$IP6TABLES" $IP6TABLES_WAIT -D "$MAIN_CHAIN"         -j "$GENERATION_GUARD_CHAIN"; then
 
-        log_error "Firewall" "IPv6 guard removal failed"             "restoring IPv4 guard"
+        log_error "Firewall" "IPv6 guard removal failed" \
+            "restoring IPv4 guard"
 
-        if ! "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1             -j "$GENERATION_GUARD_CHAIN"; then
-            log_error "Firewall" "IPv4 guard restoration failed"                 "guard state is inconsistent"
+        if ! "$IPTABLES" $IPTABLES_WAIT -I "$MAIN_CHAIN" 1             -j "$GENERATION_GUARD_CHAIN"; then
+            log_error "Firewall" "IPv4 guard restoration failed" \
+                "guard state is inconsistent"
         fi
 
         return 1
     fi
 
-    IPV4_VERIFY="$("$IPTABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || {
-        log_error "Firewall" "IPv4 guard state verification failed"             "restoring fail-closed guard"
+    IPV4_VERIFY="$("$IPTABLES" $IPTABLES_WAIT -S "$MAIN_CHAIN" 2>/dev/null)" || {
+        log_error "Firewall" "IPv4 guard state verification failed" \
+            "restoring fail-closed guard"
 
-        "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1             -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 ||             log_error "Firewall" "IPv4 guard restoration failed"                 "guard state is inconsistent"
+        "$IPTABLES" $IPTABLES_WAIT -I "$MAIN_CHAIN" 1             -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 ||             log_error "Firewall" "IPv4 guard restoration failed" \
+                "guard state is inconsistent"
 
-        "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" 1             -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 ||             log_error "Firewall" "IPv6 guard restoration failed"                 "guard state is inconsistent"
+        "$IP6TABLES" $IP6TABLES_WAIT -I "$MAIN_CHAIN" 1 \
+            -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || \
+            log_error "Firewall" "IPv6 guard restoration failed" \
+                "guard state is inconsistent"
 
         return 1
     }
 
-    IPV6_VERIFY="$("$IP6TABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || {
-        log_error "Firewall" "IPv6 guard state verification failed"             "restoring fail-closed guard"
+    IPV6_VERIFY="$("$IP6TABLES" $IP6TABLES_WAIT -S "$MAIN_CHAIN" 2>/dev/null)" || {
+        log_error "Firewall" "IPv6 guard state verification failed" \
+            "restoring fail-closed guard"
 
-        "$IPTABLES" -w 5 -I "$MAIN_CHAIN" 1             -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 ||             log_error "Firewall" "IPv4 guard restoration failed"                 "guard state is inconsistent"
+        "$IPTABLES" $IPTABLES_WAIT -I "$MAIN_CHAIN" 1             -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 ||             log_error "Firewall" "IPv4 guard restoration failed" \
+                "guard state is inconsistent"
 
-        "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" 1             -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 ||             log_error "Firewall" "IPv6 guard restoration failed"                 "guard state is inconsistent"
+        "$IP6TABLES" $IP6TABLES_WAIT -I "$MAIN_CHAIN" 1 \
+            -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || \
+            log_error "Firewall" "IPv6 guard restoration failed" \
+                "guard state is inconsistent"
 
         return 1
     }
@@ -945,7 +1051,8 @@ generation_guard_remove() {
 
     if [ "$IPV4_REMAINING" -ne 0 ] ||
        [ "$IPV6_REMAINING" -ne 0 ]; then
-        log_error "Firewall" "Guard removal verification failed"             "ipv4_hooks=$IPV4_REMAINING ipv6_hooks=$IPV6_REMAINING"
+        log_error "Firewall" "Guard removal verification failed" \
+            "ipv4_hooks=$IPV4_REMAINING ipv6_hooks=$IPV6_REMAINING"
         return 1
     fi
 
@@ -955,11 +1062,11 @@ generation_guard_remove() {
 }
 
 generation_guard_verify() {
-    "$IPTABLES" -w 5 -C "$MAIN_CHAIN" -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || return 1
-    "$IP6TABLES" -w 5 -C "$MAIN_CHAIN" -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || return 1
+    "$IPTABLES" $IPTABLES_WAIT -C "$MAIN_CHAIN" -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || return 1
+    "$IP6TABLES" $IP6TABLES_WAIT -C "$MAIN_CHAIN" -j "$GENERATION_GUARD_CHAIN" >/dev/null 2>&1 || return 1
 
-    IPV4_GUARD_RULES="$("$IPTABLES" -w 5 -S "$GENERATION_GUARD_CHAIN" 2>/dev/null)" || return 1
-    IPV6_GUARD_RULES="$("$IP6TABLES" -w 5 -S "$GENERATION_GUARD_CHAIN" 2>/dev/null)" || return 1
+    IPV4_GUARD_RULES="$("$IPTABLES" $IPTABLES_WAIT -S "$GENERATION_GUARD_CHAIN" 2>/dev/null)" || return 1
+    IPV6_GUARD_RULES="$("$IP6TABLES" $IP6TABLES_WAIT -S "$GENERATION_GUARD_CHAIN" 2>/dev/null)" || return 1
 
     IPV4_RULE_COUNT=0
     IPV6_RULE_COUNT=0
@@ -1008,12 +1115,18 @@ network_active_generation() {
     FAMILY="$1"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
-    RULES="$("$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
+    RULES="$("$IPT" $IPT_WAIT -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
 
     TARGETS=""
     COUNT=0
@@ -1065,13 +1178,13 @@ network_active_generation_complete() {
 network_generation_active_rule_ipv4() {
     GEN="$1"
     DISP="$(network_dispatcher_chain "$GEN")"
-    "$IPTABLES" -w 5 -C "$MAIN_CHAIN" -j "$DISP" >/dev/null 2>&1
+    "$IPTABLES" $IPTABLES_WAIT -C "$MAIN_CHAIN" -j "$DISP" >/dev/null 2>&1
 }
 
 network_generation_active_rule_ipv6() {
     GEN="$1"
     DISP="$(network_dispatcher_chain "$GEN")"
-    "$IP6TABLES" -w 5 -C "$MAIN_CHAIN" -j "$DISP" >/dev/null 2>&1
+    "$IP6TABLES" $IP6TABLES_WAIT -C "$MAIN_CHAIN" -j "$DISP" >/dev/null 2>&1
 }
 
 network_generation_install_active_ipv4() {
@@ -1081,7 +1194,7 @@ network_generation_install_active_ipv4() {
     network_dispatcher_chain_exists "$IPTABLES" "$DISP" || return 1
 
     LOOPBACK_POSITION="$(
-        "$IPTABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
+        "$IPTABLES" $IPTABLES_WAIT -S "$MAIN_CHAIN" 2>/dev/null |
             awk -v chain="$MAIN_CHAIN" '
                 /^-A / { RULE_POSITION++ }
                 $0 == "-A " chain " -o lo -j RETURN" {
@@ -1097,7 +1210,7 @@ network_generation_install_active_ipv4() {
     esac
 
     INSERT_POSITION=$((LOOPBACK_POSITION + 1))
-    "$IPTABLES" -w 5 -I "$MAIN_CHAIN" "$INSERT_POSITION" -j "$DISP"
+    "$IPTABLES" $IPTABLES_WAIT -I "$MAIN_CHAIN" "$INSERT_POSITION" -j "$DISP"
 }
 
 network_generation_install_active_ipv6() {
@@ -1107,7 +1220,7 @@ network_generation_install_active_ipv6() {
     network_dispatcher_chain_exists "$IP6TABLES" "$DISP" || return 1
 
     LOOPBACK_POSITION="$(
-        "$IP6TABLES" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
+        "$IP6TABLES" $IP6TABLES_WAIT -S "$MAIN_CHAIN" 2>/dev/null |
             awk -v chain="$MAIN_CHAIN" '
                 /^-A / { RULE_POSITION++ }
                 $0 == "-A " chain " -o lo -j RETURN" {
@@ -1123,43 +1236,54 @@ network_generation_install_active_ipv6() {
     esac
 
     INSERT_POSITION=$((LOOPBACK_POSITION + 1))
-    "$IP6TABLES" -w 5 -I "$MAIN_CHAIN" "$INSERT_POSITION" -j "$DISP"
+    "$IP6TABLES" $IP6TABLES_WAIT -I "$MAIN_CHAIN" "$INSERT_POSITION" -j "$DISP"
 }
 
 network_generation_remove_active_ipv4() {
     GEN="$1"
     DISP="$(network_dispatcher_chain "$GEN")"
-    "$IPTABLES" -w 5 -D "$MAIN_CHAIN" -j "$DISP"
+    "$IPTABLES" $IPTABLES_WAIT -D "$MAIN_CHAIN" -j "$DISP"
 }
 
 network_generation_remove_active_ipv6() {
     GEN="$1"
     DISP="$(network_dispatcher_chain "$GEN")"
-    "$IP6TABLES" -w 5 -D "$MAIN_CHAIN" -j "$DISP"
+    "$IP6TABLES" $IP6TABLES_WAIT -D "$MAIN_CHAIN" -j "$DISP"
 }
 
 chain_exists() {
-    "$1" -w 5 -S "$2" >/dev/null 2>&1
+    if [ "$1" = "$IPTABLES" ]; then
+        IPT_WAIT="$IPTABLES_WAIT"
+    else
+        IPT_WAIT="$IP6TABLES_WAIT"
+    fi
+    "$1" $IPT_WAIT -S "$2" >/dev/null 2>&1
 }
 
 bootstrap_main_chain_fail_closed_family() {
     FAMILY="$1"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
     if ! chain_exists "$IPT" "$MAIN_CHAIN"; then
-        "$IPT" -w 5 -N "$MAIN_CHAIN" || return 1
-        "$IPT" -w 5 -A "$MAIN_CHAIN" -o lo -j RETURN || return 1
-        "$IPT" -w 5 -A "$MAIN_CHAIN" -j DROP || return 1
-        "$IPT" -w 5 -A "$MAIN_CHAIN" -j RETURN || return 1
+        "$IPT" $IPT_WAIT -N "$MAIN_CHAIN" || return 1
+        "$IPT" $IPT_WAIT -A "$MAIN_CHAIN" -o lo -j RETURN || return 1
+        "$IPT" $IPT_WAIT -A "$MAIN_CHAIN" -j DROP || return 1
+        "$IPT" $IPT_WAIT -A "$MAIN_CHAIN" -j RETURN || return 1
         return 0
     fi
 
-    RULES="$("$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
+    RULES="$("$IPT" $IPT_WAIT -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
 
 
     LOOPBACK_COUNT=0
@@ -1193,7 +1317,7 @@ EOF
 
     # An existing network generation is not modified here.
     ACTIVE_NETWORK_GENERATION="$(
-        "$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
+        "$IPT" $IPT_WAIT -S "$MAIN_CHAIN" 2>/dev/null |
             sed -n 's/^-A TIRNFW -j \(TIRNFW-NET-G[0-9][0-9]*\)$/\1/p' |
             head -n 1
     )"
@@ -1202,7 +1326,7 @@ EOF
        network_generation_verify_complete \
            "${ACTIVE_NETWORK_GENERATION#TIRNFW-NET-G}" 2>/dev/null; then
         if [ "$LOOPBACK_COUNT" -eq 0 ]; then
-            "$IPT" -w 5 -I "$MAIN_CHAIN" 1 -o lo -j RETURN || return 1
+            "$IPT" $IPT_WAIT -I "$MAIN_CHAIN" 1 -o lo -j RETURN || return 1
         elif [ "$LOOPBACK_COUNT" -ne 1 ]; then
             return 1
         fi
@@ -1211,7 +1335,7 @@ EOF
 
     # An existing policy generation or guard is not modified here.
     ACTIVE_GENERATION="$(
-        "$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null |
+        "$IPT" $IPT_WAIT -S "$MAIN_CHAIN" 2>/dev/null |
             sed -n 's/^-A TIRNFW -j \(TIRNFW-G[0-9][0-9]*\)$/\1/p' |
             head -n 1
     )"
@@ -1219,7 +1343,7 @@ EOF
     if generation_verify_stable_dispatcher_family \
         "$ACTIVE_GENERATION" "$FAMILY" 2>/dev/null; then
         if [ "$LOOPBACK_COUNT" -eq 0 ]; then
-            "$IPT" -w 5 -I "$MAIN_CHAIN" 1 -o lo -j RETURN || return 1
+            "$IPT" $IPT_WAIT -I "$MAIN_CHAIN" 1 -o lo -j RETURN || return 1
         elif [ "$LOOPBACK_COUNT" -ne 1 ]; then
             return 1
         fi
@@ -1248,12 +1372,18 @@ bootstrap_output_hook_family() {
     FAMILY="$1"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
-    RULES="$("$IPT" -w 5 -S OUTPUT 2>/dev/null)" || return 1
+    RULES="$("$IPT" $IPT_WAIT -S OUTPUT 2>/dev/null)" || return 1
 
     COUNT=0
     POSITION=0
@@ -1294,12 +1424,12 @@ EOF
 
     if [ "$COUNT" -eq 1 ]; then
         # Remove only our exact owned hook. Do not touch any other OUTPUT rule.
-        "$IPT" -w 5 -D OUTPUT -j "$MAIN_CHAIN" || return 1
+        "$IPT" $IPT_WAIT -D OUTPUT -j "$MAIN_CHAIN" || return 1
     fi
 
-    "$IPT" -w 5 -I OUTPUT 1 -j "$MAIN_CHAIN" || return 1
+    "$IPT" $IPT_WAIT -I OUTPUT 1 -j "$MAIN_CHAIN" || return 1
 
-    RULES="$("$IPT" -w 5 -S OUTPUT 2>/dev/null)" || return 1
+    RULES="$("$IPT" $IPT_WAIT -S OUTPUT 2>/dev/null)" || return 1
     COUNT=0
     POSITION=0
     HOOK_POSITION=0
@@ -2365,61 +2495,87 @@ normalize_ipv6_64() {
 
 build_network_state() {
     {
-        WLAN_UP=$("$IP" -o link show up 2>/dev/null | awk -F': ' '$2=="wlan0" {print "yes"}')
+        "$IP" -o link show up 2>/dev/null |
+            awk -F': ' '
+            $2 != "lo" &&
+            $2 !~ /^rmnet[0-9]+$/ &&
+            $2 !~ /^tun[0-9]+$/ &&
+            $2 !~ /^ppp[0-9]+$/ {
+                print $2
+            }' |
+            while read -r IFACE; do
+                [ -n "$IFACE" ] || continue
 
-        if [ "$WLAN_UP" = "yes" ]; then
-            WLAN4_FOUND=$("$IP" -4 route show dev wlan0 proto kernel scope link 2>/dev/null |
-                awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/ {print $1; exit}')
+                case "$IFACE" in
+                    wlan*)
+                        TYPE4="WLAN4"
+                        TYPE6="WLAN6"
+                        ;;
+                    *)
+                        TYPE4="NET4"
+                        TYPE6="NET6"
+                        ;;
+                esac
 
-            if [ -n "$WLAN4_FOUND" ]; then
-                printf 'WLAN4|%s\n' "$WLAN4_FOUND"
-            else
-                "$IP" -4 -o addr show dev wlan0 scope global 2>/dev/null |
-                    awk '
-                    function network(ip, prefix,    a,n,b,mask,i,out) {
-                        split(ip,a,".")
-                        n=prefix
-                        out=""
+                NET4_FOUND=$("$IP" -4 route show dev "$IFACE" \
+                    proto kernel scope link 2>/dev/null |
+                    awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/ {
+                        print $1
+                        exit
+                    }')
 
-                        for (i=1;i<=4;i++) {
-                            if (n >= 8) {
-                                b=a[i]
-                                n-=8
-                            } else if (n > 0) {
-                                mask=256-(2^(8-n))
-                                b=int(a[i]/mask)*mask
-                                n=0
-                            } else {
-                                b=0
+                if [ -n "$NET4_FOUND" ]; then
+                    printf '%s|%s|%s\n' "$TYPE4" "$NET4_FOUND" "$IFACE"
+                else
+                    "$IP" -4 -o addr show dev "$IFACE" scope global 2>/dev/null |
+                        awk -v type="$TYPE4" -v iface="$IFACE" '
+                        function network(ip, prefix,    a,n,b,mask,i,out) {
+                            split(ip,a,".")
+                            n=prefix
+                            out=""
+
+                            for (i=1;i<=4;i++) {
+                                if (n >= 8) {
+                                    b=a[i]
+                                    n-=8
+                                } else if (n > 0) {
+                                    mask=256-(2^(8-n))
+                                    b=int(a[i]/mask)*mask
+                                    n=0
+                                } else {
+                                    b=0
+                                }
+
+                                out=out (i > 1 ? "." : "") b
                             }
 
-                            out=out (i > 1 ? "." : "") b
+                            return out "/" prefix
                         }
 
-                        return out "/" prefix
-                    }
+                        $4 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/ {
+                            split($4,a,"/")
+                            print type "|" network(a[1],a[2]) "|" iface
+                            exit
+                        }'
+                fi
 
-                    $4 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/ {
-                        split($4,a,"/")
-                        print "WLAN4|" network(a[1],a[2])
-                        exit
-                    }'
-            fi
-
-            "$IP" -6 -o addr show dev wlan0 scope global 2>/dev/null |
-                awk '{print $4}' |
-                while read -r ADDR; do
-                    case "$ADDR" in
-                        */64)
-                            PREFIX=$(normalize_ipv6_64 "$ADDR")
-                            [ -n "$PREFIX" ] && printf 'WLAN6|%s\n' "$PREFIX"
-                            ;;
-                    esac
-                done
-        fi
+                "$IP" -6 -o addr show dev "$IFACE" scope global 2>/dev/null |
+                    awk '{print $4}' |
+                    while read -r ADDR; do
+                        case "$ADDR" in
+                            */64)
+                                PREFIX=$(normalize_ipv6_64 "$ADDR")
+                                [ -n "$PREFIX" ] || continue
+                                printf '%s|%s|%s\n' "$TYPE6" "$PREFIX" "$IFACE"
+                                ;;
+                        esac
+                    done
+            done
 
         "$IP" -o link show up 2>/dev/null |
-            awk -F': ' '$2 ~ /^rmnet[0-9]+$/ {print "MOBILE|" $2}'
+            awk -F': ' '$2 ~ /^rmnet[0-9]+$/ {
+                print "MOBILE|" $2
+            }'
 
         /system/bin/dumpsys connectivity 2>/dev/null |
             awk '
@@ -2478,13 +2634,18 @@ build_network_state() {
     } | sort -u
 }
 
-
 next_split_generation_id() {
     MAX_GENERATION=0
 
     for IPT in "$IPTABLES" "$IP6TABLES"; do
+        if [ "$IPT" = "$IPTABLES" ]; then
+            IPT_WAIT="$IPTABLES_WAIT"
+        else
+            IPT_WAIT="$IP6TABLES_WAIT"
+        fi
+
         for CHAIN in $(
-            "$IPT" -w 5 -S 2>/dev/null |
+            "$IPT" $IPT_WAIT -S 2>/dev/null |
             sed -n \
                 -e 's/^-N TIRNFW-G\([0-9][0-9]*\)$/\1/p' \
                 -e 's/^-N TIRNFW-G\([0-9][0-9]*\)-[MWL]$/\1/p' \
@@ -2509,8 +2670,14 @@ policy_generation_create_family() {
     FAMILY="$2"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -2522,16 +2689,16 @@ policy_generation_create_family() {
     generation_chain_exists "$IPT" "$WIFI" && return 1
     generation_chain_exists "$IPT" "$LAN" && return 1
 
-    "$IPT" -w 5 -N "$MOB" || return 1
+    "$IPT" $IPT_WAIT -N "$MOB" || return 1
 
-    if ! "$IPT" -w 5 -N "$WIFI"; then
-        "$IPT" -w 5 -X "$MOB" >/dev/null 2>&1 || true
+    if ! "$IPT" $IPT_WAIT -N "$WIFI"; then
+        "$IPT" $IPT_WAIT -X "$MOB" >/dev/null 2>&1 || true
         return 1
     fi
 
-    if ! "$IPT" -w 5 -N "$LAN"; then
-        "$IPT" -w 5 -X "$WIFI" >/dev/null 2>&1 || true
-        "$IPT" -w 5 -X "$MOB" >/dev/null 2>&1 || true
+    if ! "$IPT" $IPT_WAIT -N "$LAN"; then
+        "$IPT" $IPT_WAIT -X "$WIFI" >/dev/null 2>&1 || true
+        "$IPT" $IPT_WAIT -X "$MOB" >/dev/null 2>&1 || true
         return 1
     fi
 
@@ -2543,8 +2710,14 @@ policy_generation_delete_family() {
     FAMILY="$2"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -2554,8 +2727,8 @@ policy_generation_delete_family() {
 
     for CHAIN in "$MOB" "$WIFI" "$LAN"; do
         if generation_chain_exists "$IPT" "$CHAIN"; then
-            "$IPT" -w 5 -F "$CHAIN" || return 1
-            "$IPT" -w 5 -X "$CHAIN" || return 1
+            "$IPT" $IPT_WAIT -F "$CHAIN" || return 1
+            "$IPT" $IPT_WAIT -X "$CHAIN" || return 1
         fi
     done
 
@@ -2587,8 +2760,14 @@ policy_generation_populate_family() {
     PREPARED_POLICY="$3"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -2596,9 +2775,9 @@ policy_generation_populate_family() {
     WIFI="$(policy_wifi_chain "$GEN")"
     LAN="$(policy_lan_chain "$GEN")"
 
-    "$IPT" -w 5 -A "$MOB" -j RETURN || return 1
-    "$IPT" -w 5 -A "$WIFI" -j RETURN || return 1
-    "$IPT" -w 5 -A "$LAN" -j RETURN || return 1
+    "$IPT" $IPT_WAIT -A "$MOB" -j RETURN || return 1
+    "$IPT" $IPT_WAIT -A "$WIFI" -j RETURN || return 1
+    "$IPT" $IPT_WAIT -A "$LAN" -j RETURN || return 1
 
     while IFS='|' read -r USER PACKAGE UID NETWORK ACTION; do
         case "$NETWORK" in
@@ -2610,7 +2789,7 @@ policy_generation_populate_family() {
 
         case "$ACTION" in
             BLOCK)
-                "$IPT" -w 5 -I "$TARGET" 1 \
+                "$IPT" $IPT_WAIT -I "$TARGET" 1 \
                     -m owner --uid-owner "$UID" -j DROP || return 1
                 ;;
             *)
@@ -2627,8 +2806,14 @@ policy_generation_verify_family() {
     FAMILY="$2"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -2637,7 +2822,7 @@ policy_generation_verify_family() {
     LAN="$(policy_lan_chain "$GEN")"
 
     for CHAIN in "$MOB" "$WIFI" "$LAN"; do
-        RULES="$("$IPT" -w 5 -S "$CHAIN" 2>/dev/null)" || return 1
+        RULES="$("$IPT" $IPT_WAIT -S "$CHAIN" 2>/dev/null)" || return 1
 
         RETURN_COUNT=0
         LAST_RULE=""
@@ -2686,13 +2871,19 @@ generation_verify_stable_dispatcher_family() {
     FAMILY="$2"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
     EXPECTED="$(generation_dispatcher_chain "$GEN")"
-    RULES="$("$IPT" -w 5 -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
+    RULES="$("$IPT" $IPT_WAIT -S "$MAIN_CHAIN" 2>/dev/null)" || return 1
 
     GENERATION_COUNT=0
     GENERATION_TARGET=""
@@ -2778,8 +2969,14 @@ policy_pointer_active_generation() {
     FAMILY="$1"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -2787,9 +2984,9 @@ policy_pointer_active_generation() {
     WIFI="$(policy_wifi_pointer_chain)"
     LAN="$(policy_lan_pointer_chain)"
 
-    RULES_M="$("$IPT" -w 5 -S "$MOB" 2>/dev/null)" || return 1
-    RULES_W="$("$IPT" -w 5 -S "$WIFI" 2>/dev/null)" || return 1
-    RULES_L="$("$IPT" -w 5 -S "$LAN" 2>/dev/null)" || return 1
+    RULES_M="$("$IPT" $IPT_WAIT -S "$MOB" 2>/dev/null)" || return 1
+    RULES_W="$("$IPT" $IPT_WAIT -S "$WIFI" 2>/dev/null)" || return 1
+    RULES_L="$("$IPT" $IPT_WAIT -S "$LAN" 2>/dev/null)" || return 1
 
     TARGET_M="$(printf '%s\n' "$RULES_M" |
         sed -n 's/^-A TIRNFW-POLICY-M -j \(TIRNFW-G[0-9][0-9]*-M\)$/\1/p')"
@@ -2826,8 +3023,14 @@ policy_pointer_activate_family() {
     GEN="$2"
 
     case "$FAMILY" in
-        ipv4) IPT="$IPTABLES" ;;
-        ipv6) IPT="$IP6TABLES" ;;
+        ipv4)
+            IPT="$IPTABLES"
+            IPT_WAIT="$IPTABLES_WAIT"
+            ;;
+        ipv6)
+            IPT="$IP6TABLES"
+            IPT_WAIT="$IP6TABLES_WAIT"
+            ;;
         *) return 1 ;;
     esac
 
@@ -2851,18 +3054,18 @@ policy_pointer_activate_family() {
     policy_pointer_chain_exists "$IPT" "$WIFI" || return 1
     policy_pointer_chain_exists "$IPT" "$LAN" || return 1
 
-    "$IPT" -w 5 -F "$MOB" || return 1
-    "$IPT" -w 5 -F "$WIFI" || return 1
-    "$IPT" -w 5 -F "$LAN" || return 1
+    "$IPT" $IPT_WAIT -F "$MOB" || return 1
+    "$IPT" $IPT_WAIT -F "$WIFI" || return 1
+    "$IPT" $IPT_WAIT -F "$LAN" || return 1
 
-    "$IPT" -w 5 -A "$MOB" -j "$TARGET_M" || return 1
-    "$IPT" -w 5 -A "$MOB" -j RETURN || return 1
+    "$IPT" $IPT_WAIT -A "$MOB" -j "$TARGET_M" || return 1
+    "$IPT" $IPT_WAIT -A "$MOB" -j RETURN || return 1
 
-    "$IPT" -w 5 -A "$WIFI" -j "$TARGET_W" || return 1
-    "$IPT" -w 5 -A "$WIFI" -j RETURN || return 1
+    "$IPT" $IPT_WAIT -A "$WIFI" -j "$TARGET_W" || return 1
+    "$IPT" $IPT_WAIT -A "$WIFI" -j RETURN || return 1
 
-    "$IPT" -w 5 -A "$LAN" -j "$TARGET_L" || return 1
-    "$IPT" -w 5 -A "$LAN" -j RETURN || return 1
+    "$IPT" $IPT_WAIT -A "$LAN" -j "$TARGET_L" || return 1
+    "$IPT" $IPT_WAIT -A "$LAN" -j RETURN || return 1
 
     policy_pointer_verify_family "$FAMILY"
 }
@@ -3570,22 +3773,20 @@ apply_dispatcher() {
         awk -F'|' '
         NR == FNR {
             if ($1 == "MOBILE") {
-                old_mobile[$2] = 1
-            } else if ($1 == "WLAN4") {
-                old_wlan4[$2] = 1
-            } else if ($1 == "WLAN6") {
-                old_wlan6[$2] = 1
+                old_mobile[$0] = 1
+            } else if ($1 == "WLAN4" || $1 == "WLAN6" ||
+                       $1 == "NET4" || $1 == "NET6") {
+                old_network[$0] = 1
             }
             next
         }
 
         {
             if ($1 == "MOBILE") {
-                current_mobile[$2] = 1
-            } else if ($1 == "WLAN4") {
-                current_wlan4[$2] = 1
-            } else if ($1 == "WLAN6") {
-                current_wlan6[$2] = 1
+                current_mobile[$0] = 1
+            } else if ($1 == "WLAN4" || $1 == "WLAN6" ||
+                       $1 == "NET4" || $1 == "NET6") {
+                current_network[$0] = 1
             } else if ($1 == "VPN") {
                 vpn[$0] = 1
             }
@@ -3594,31 +3795,26 @@ apply_dispatcher() {
         END {
             for (v in old_mobile)
                 mobile[v] = 1
+
             for (v in current_mobile)
                 mobile[v] = 1
 
-            if (length(current_wlan4)) {
-                for (v in current_wlan4)
-                    wlan4[v] = 1
+            if (length(current_network)) {
+                for (v in current_network)
+                    network[v] = 1
             } else {
-                for (v in old_wlan4)
-                    wlan4[v] = 1
+                for (v in old_network)
+                    network[v] = 1
             }
 
-            if (length(current_wlan6)) {
-                for (v in current_wlan6)
-                    wlan6[v] = 1
-            } else {
-                for (v in old_wlan6)
-                    wlan6[v] = 1
-            }
-
-            for (v in mobile)
+            for (v in mobile) {
+                sub(/^MOBILE\|/, "", v)
                 print "MOBILE|" v
-            for (v in wlan4)
-                print "WLAN4|" v
-            for (v in wlan6)
-                print "WLAN6|" v
+            }
+
+            for (v in network)
+                print v
+
             for (v in vpn)
                 print v
         }' "$STATE_FILE" "$CURRENT_STATE" | sort -u > "$TMP_STATE"
@@ -3966,6 +4162,10 @@ import_policy_transaction() (
     exit 0
 )
 
+
+if ! detect_iptables_wait_mode; then
+    exit 1
+fi
 
 if [ "${1:-}" = "--import-policy" ]; then
     import_policy_transaction "import"

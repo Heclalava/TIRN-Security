@@ -1,6 +1,14 @@
 #!/system/bin/sh
 
 PM="/system/bin/pm"
+if [ -x /system/bin/awk ]; then
+    AWK="/system/bin/awk"
+elif [ -x /system/xbin/awk ]; then
+    AWK="/system/xbin/awk"
+else
+    printf 'STATUS|AWK_NOT_FOUND\n'
+    exit 1
+fi
 DATA_DIR="/data/adb/tirnsecurity"
 CACHE="$DATA_DIR/apps.json"
 LABELS="$DATA_DIR/labels.conf"
@@ -18,7 +26,7 @@ get_package_records() {
 
 get_label_override() {
     PACKAGE="$1"
-    /system/bin/awk -F"=" -v p="$PACKAGE" '$1 == p { print substr($0, length($1) + 2); exit }' "$LABELS"
+    "$AWK" -F"=" -v p="$PACKAGE" '$1 == p { print substr($0, length($1) + 2); exit }' "$LABELS"
 }
 
 get_apk_label() {
@@ -30,7 +38,7 @@ get_apk_label() {
 
 get_package_name_fallback() {
     PACKAGE="$1"
-    /system/bin/awk -F"." '{
+    "$AWK" -F"." '{
         name=""
         for (i=2; i<=NF; i++) {
             part=$i

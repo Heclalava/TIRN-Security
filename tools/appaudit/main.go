@@ -227,10 +227,11 @@ func policyMode() {
 		Package string
 	}
 
-	appsByUID := make(map[string]policyApp, len(appsFile.Apps))
+	appsByIdentity := make(map[string]policyApp, len(appsFile.Apps))
 	for _, app := range appsFile.Apps {
-		if _, exists := appsByUID[app.UID]; !exists {
-			appsByUID[app.UID] = policyApp{
+		key := app.User + "|" + app.Package + "|" + app.UID
+		if _, exists := appsByIdentity[key]; !exists {
+			appsByIdentity[key] = policyApp{
 				Name:    app.Name,
 				Package: app.Package,
 			}
@@ -261,25 +262,28 @@ func policyMode() {
 		}
 
 		parts := strings.Split(line, "|")
-		if len(parts) != 3 {
+		if len(parts) != 5 {
 			continue
 		}
 
-		uid := strings.TrimSpace(parts[0])
-		network := strings.TrimSpace(parts[1])
-		action := strings.TrimSpace(parts[2])
-		if uid == "" || network == "" || action == "" {
+		user := strings.TrimSpace(parts[0])
+		pkg := strings.TrimSpace(parts[1])
+		uid := strings.TrimSpace(parts[2])
+		network := strings.TrimSpace(parts[3])
+		action := strings.TrimSpace(parts[4])
+
+		if user == "" || pkg == "" || uid == "" || network == "" || action == "" {
 			continue
 		}
 
-		app := appsByUID[uid]
+		app := appsByIdentity[user+"|"+pkg+"|"+uid]
 		name := app.Name
-		pkg := app.Package
+		packageName := app.Package
 		if name == "" {
 			name = "Unknown"
 		}
-		if pkg == "" {
-			pkg = "Unknown"
+		if packageName == "" {
+			packageName = "Unknown"
 		}
 
 		rows = append(rows, policyRow{
@@ -287,7 +291,7 @@ func policyMode() {
 			Network: network,
 			Action:  action,
 			AppName: name,
-			Package: pkg,
+			Package: packageName,
 		})
 	}
 
