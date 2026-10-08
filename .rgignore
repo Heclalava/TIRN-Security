@@ -1,0 +1,6 @@
+backups/
+.git/
+tirn-atomic-backup/
+*.pre-*
+*.bak
+*.old
