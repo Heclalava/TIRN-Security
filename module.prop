@@ -1,6 +1,6 @@
 id=tirnsecurity
 name=TIRN Security
-version=1.0.1
-versionCode=1001
+version=1.0.2
+versionCode=1002
 author=Heclalava
 description=Root-native per-app firewall for IPv4 and IPv6
