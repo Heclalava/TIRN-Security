@@ -6,7 +6,7 @@ cd "$ROOT"
 
 PKG="TIRN-Security-$(git describe --tags --always)-armv7-runtime-install.zip"
 
-echo "=== BUILD RUNTIME HELPERS ==="
+echo "=== BUILD ARMV7 RUNTIME HELPERS ==="
 
 (
     cd tools/apklabel
@@ -63,14 +63,8 @@ with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
             "appaudit": Path("tools/appaudit/appaudit-armv7"),
             "apphelper": Path("tools/apphelper/apphelper-armv7"),
         }
-        working_tree = {
-            "refresh_apps": Path("refresh_apps"),
-            "service.sh": Path("service.sh"),
-        }
         if path in armv7:
             data = armv7[path].read_bytes()
-        elif path in working_tree:
-            data = working_tree[path].read_bytes()
         else:
             data = subprocess.check_output(["git", "show", f"HEAD:{path}"])
         info = zipfile.ZipInfo(path)
