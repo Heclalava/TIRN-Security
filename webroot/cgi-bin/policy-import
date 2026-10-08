@@ -8,17 +8,18 @@ echo
 
 data_dir="/data/adb/tirnsecurity"
 apps="$data_dir/apps.json"
-body="$(cat)"
-apps_json="$(cat "$apps" 2>/dev/null)"
-
-if [ -z "$apps_json" ]; then
+if [ ! -s "$apps" ]; then
     printf '%s\n' '{"status":"ERROR","message":"Application cache is unavailable."}'
     exit 1
 fi
 
 sep='__TIRN_SECURITY_APPS_END_7f31c9__'
 
-printf '%s\n%s\n%s\n' "$apps_json" "$sep" "$body" |
+{
+    cat "$apps"
+    printf '%s\n' "$sep"
+    cat
+} |
 awk -v sep="$sep" '
 function json_escape(s,    t){
     t=s
@@ -214,16 +215,18 @@ function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,c
     if(network!="LAN" && network!="MOBILE" && network!="WIFI"){
         stale++
         stale_count++
-        stale_json=stale_json (stale_json?",":"") \
-            "{\"reason\":\"INVALID_NETWORK\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
+        stale_prefix=(stale_json?",":"")
+        stale_item="{\"reason\":\"INVALID_NETWORK\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
+        stale_json=stale_json stale_prefix stale_item
         return
     }
 
     if(action!="BLOCK"){
         stale++
         stale_count++
-        stale_json=stale_json (stale_json?",":"") \
-            "{\"reason\":\"INVALID_ACTION\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
+        stale_prefix=(stale_json?",":"")
+        stale_item="{\"reason\":\"INVALID_ACTION\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
+        stale_json=stale_json stale_prefix stale_item
         return
     }
 
@@ -235,8 +238,9 @@ function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,c
     if(current_uid==""){
         stale++
         stale_count++
-        stale_json=stale_json (stale_json?",":"") \
-            "{\"reason\":\"APP_MISSING\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
+        stale_prefix=(stale_json?",":"")
+        stale_item="{\"reason\":\"APP_MISSING\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "}}"
+        stale_json=stale_json stale_prefix stale_item
         return
     }
 
@@ -248,8 +252,9 @@ function process_policy(o,    uid,network,action,user,pkg,name,profile,sys,key,c
         stale++
         stale_count++
         uid_mismatch++
-        stale_json=stale_json (stale_json?",":"") \
-            "{\"reason\":\"UID_CHANGED\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "},\"current\":{\"uid\":\"" ecurrent_uid "\",\"name\":\"" ecurrent_name "\",\"profile\":\"" ecurrent_profile "\"}}"
+        stale_prefix=(stale_json?",":"")
+        stale_item="{\"reason\":\"UID_CHANGED\",\"uid\":\"" euid "\",\"network\":\"" enetwork "\",\"action\":\"" eaction "\",\"app\":{\"name\":\"" ename "\",\"pkg\":\"" epkg "\",\"user\":\"" euser "\",\"profile\":\"" eprofile "\",\"system\":" sys "},\"current\":{\"uid\":\"" ecurrent_uid "\",\"name\":\"" ecurrent_name "\",\"profile\":\"" ecurrent_profile "\"}}"
+        stale_json=stale_json stale_prefix stale_item
         return
     }
 
