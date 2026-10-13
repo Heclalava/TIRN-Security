@@ -806,6 +806,20 @@ button{color:inherit}
   width:min(420px,calc(100vw - 28px));
 }
 
+#staleImportCompleteBack .import-complete-modal{
+  max-height:calc(100vh - 60px);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+
+#staleImportCompleteBack .stale-import-rules{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+}
+
 .import-complete-modal h2{
   margin-top:0;
 }
