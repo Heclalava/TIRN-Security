@@ -1,3 +1,9 @@
+## TIRN Security 1.0.3 alpha
+
+> Release Date: 2026-10-13
+
+- Fixed scrolling in the stale-policy import completion modal when many rules are listed.
+
 ## TIRN Security 1.0.2 alpha
 
 > Release Date: 2026-10-08
